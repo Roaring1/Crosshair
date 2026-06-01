@@ -18,11 +18,18 @@ import subprocess
 import shutil
 from pathlib import Path
 
-APP_ID = "purplecrosshair"
-APP_NAME = "PurpleCrosshair"
+APP_ID      = "crosshair"
+APP_NAME    = "Crosshair"
 APP_VERSION = "3.1"
-DEFAULT_SOCKET = str(Path.home() / ".cache" / APP_ID / "ipc.sock")
+DEFAULT_SOCKET = str(Path.home() / ".cache"  / APP_ID / "ipc.sock")
 DEFAULT_CONFIG = str(Path.home() / ".config" / APP_ID / "config.json")
+
+# One-time migration: copy config from old purplecrosshair location
+_OLD_CONFIG = str(Path.home() / ".config" / "purplecrosshair" / "config.json")
+if Path(_OLD_CONFIG).exists() and not Path(DEFAULT_CONFIG).exists():
+    import shutil as _shutil
+    Path(DEFAULT_CONFIG).parent.mkdir(parents=True, exist_ok=True)
+    _shutil.copy2(_OLD_CONFIG, DEFAULT_CONFIG)
 DEFAULT_INSTALL_DIR = str(Path.home() / ".local" / "share" / APP_ID)
 DEFAULT_BIN = str(Path.home() / ".local" / "bin" / APP_ID)
 PID_FILE = str(Path.home() / ".cache" / APP_ID / "daemon.pid")
