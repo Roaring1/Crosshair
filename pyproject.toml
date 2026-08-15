@@ -1,0 +1,17 @@
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers --strict-config"
+testpaths = ["tests"]
+markers = [
+  "gui: requires a graphical display",
+  "wayland: requires native Plasma Wayland and gtk-layer-shell",
+  "x11: requires X11",
+  "slow: race or long-run test",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = []
