@@ -9,3 +9,7 @@ venv/
 *.swp
 *~
 .DS_Store
+.coverage
+__pycache__/
+*.pyc
+.pytest_cache/
