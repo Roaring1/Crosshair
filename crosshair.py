@@ -1,40 +1,48 @@
 #!/usr/bin/env python3
 # Crosshair.py -- GTK3 crosshair overlay for Linux (Wayland + X11)
-# 28/05/2026 patch: deduped draw code, X11 input passthrough + type hint,
-#   dot_ring shape, --status flag, active-monitor in dropdown, fix tray toggle
-#   not syncing checkbox, fix Gtk.Arrow deprecation, fix scale label layout,
-#   math.tau, monitor_index max 32, ASCII section separators
+#
+# v3.2.0 hardening pass (Nobara/KDE audit):
+#   - Removed all pgrep/pkill/PID-file process-name killing (C-01/C-02).
+#     Single-instance is now an advisory flock under $XDG_RUNTIME_DIR.
+#   - Config load/save moved to crosshair_core: atomic writes, symlink
+#     refusal, corrupt-file preservation, strict IPC validation (C-05/H-16).
+#   - IPC is a bounded-size JSON protocol with peer-UID checking and a
+#     boolean `ok` on every response (H-06).
+#   - Actual GDK backend is detected (not just $XDG_SESSION_TYPE); native
+#     Wayland without GTK Layer Shell now fails clearly instead of drawing
+#     an unmanaged fallback window (C-06/C-07).
+#   - Autostart is XDG-only; the old systemd user service is removed on
+#     install/uninstall (C-03).
+#   - Restart uses a pipe-EOF handoff so the replacement never races the
+#     outgoing process for the lock/socket (H-11).
+#   - See INTEGRATION.md and the release-gate checklist for the full list.
+#
+# 28/05/2026 patch (v3.1, preserved behavior): deduped draw code, X11 input
+#   passthrough + type hint, dot_ring shape, --status flag, active-monitor
+#   in dropdown, fix tray toggle not syncing checkbox, fix Gtk.Arrow
+#   deprecation, fix scale label layout, math.tau, ASCII section separators
 
 import argparse
+import contextlib
+import importlib
 import json
+import logging
 import math
 import os
-import signal
-import socket
-import sys
-import threading
-import time
-import subprocess
 import shutil
+import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 
-APP_ID      = "crosshair"
-APP_NAME    = "Crosshair"
-APP_VERSION = "3.1"
-DEFAULT_SOCKET = str(Path.home() / ".cache"  / APP_ID / "ipc.sock")
-DEFAULT_CONFIG = str(Path.home() / ".config" / APP_ID / "config.json")
+import crosshair_core as core
 
-# One-time migration: copy config from old purplecrosshair location
-_OLD_CONFIG = str(Path.home() / ".config" / "purplecrosshair" / "config.json")
-if Path(_OLD_CONFIG).exists() and not Path(DEFAULT_CONFIG).exists():
-    import shutil as _shutil
-    Path(DEFAULT_CONFIG).parent.mkdir(parents=True, exist_ok=True)
-    _shutil.copy2(_OLD_CONFIG, DEFAULT_CONFIG)
-DEFAULT_INSTALL_DIR = str(Path.home() / ".local" / "share" / APP_ID)
-DEFAULT_BIN = str(Path.home() / ".local" / "bin" / APP_ID)
-PID_FILE = str(Path.home() / ".cache" / APP_ID / "daemon.pid")
+APP_ID = core.APP_ID
+APP_NAME = core.APP_NAME
+APP_VERSION = core.APP_VERSION
 
-# --- config helpers
+# --- small pure helpers (unchanged from v3.1) ---------------------------
 
 def _clamp(v, lo, hi):
     return lo if v < lo else hi if v > hi else v
@@ -59,473 +67,308 @@ def _hex_to_rgba(hexstr, alpha=1.0):
 
 def _rgba_to_hex(rgba):
     r, g, b = rgba[0], rgba[1], rgba[2]
-    return "#{:02x}{:02x}{:02x}".format(
-        int(_clamp(r, 0, 1) * 255),
-        int(_clamp(g, 0, 1) * 255),
-        int(_clamp(b, 0, 1) * 255),
-    )
+    ri = int(_clamp(r, 0, 1) * 255)
+    gi = int(_clamp(g, 0, 1) * 255)
+    bi = int(_clamp(b, 0, 1) * 255)
+    return f"#{ri:02x}{gi:02x}{bi:02x}"
 
-# --- config
-
-def default_config():
-    return {
-        "enabled": True,
-        "shape": "dot",  # dot, cross, x, plus, ring, circle, cross_dot, x_dot, dot_ring
-        "opacity": 0.95,
-        "size": 5,
-        "thickness": 2,
-        "gap": 3,
-        "color": "#a000ff",
-        "outline": {
-            "enabled": True,
-            "color": "#000000",
-            "opacity": 0.80,
-            "thickness": 1,
-        },
-        "shadow": {
-            "enabled": False,
-            "color": "#000000",
-            "opacity": 0.35,
-            "offset_x": 1,
-            "offset_y": 1,
-        },
-        "monitor_mode": "all",
-        "monitor_index": 0,
-        "monitor_name": "",
-        "preview_bg": "#222222",
-        "auto_save": True,
-    }
-
-def load_config(path=DEFAULT_CONFIG):
-    cfg = default_config()
-    p = Path(path)
-    if p.exists():
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                cfg = deep_merge(cfg, data)
-        except Exception:
-            pass
-    cfg = sanitize_config(cfg)
+def _sanitize_inplace(cfg: dict) -> dict:
+    """Sanitize cfg in place -- matches the mutation pattern the GUI relies on."""
+    clean = core.sanitize_config(cfg)
+    cfg.clear()
+    cfg.update(clean)
     return cfg
 
-def save_config(cfg, path=DEFAULT_CONFIG):
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    cfg = sanitize_config(cfg)
-    p.write_text(json.dumps(cfg, indent=2, sort_keys=True), encoding="utf-8")
+# --- installer / autostart (XDG-only, atomic, symlink-safe) -------------
 
-def deep_merge(base, override):
-    out = dict(base)
-    for k, v in (override or {}).items():
-        if isinstance(v, dict) and isinstance(out.get(k), dict):
-            out[k] = deep_merge(out[k], v)
-        else:
-            out[k] = v
-    return out
+def _desktop_entry_exec(bin_path: Path) -> str:
+    # Desktop Entry Specification quoting: wrap in double quotes, escape
+    # embedded backslashes/quotes.
+    escaped = str(bin_path).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}" --daemon --no-ui'
 
-_VALID_SHAPES = {"dot", "cross", "x", "plus", "ring", "circle",
-                 "cross_dot", "x_dot", "dot_ring"}
-
-def sanitize_config(cfg):
-    orig = cfg if isinstance(cfg, dict) else None
-    out = deep_merge(default_config(), orig or {})
-
-    out["enabled"] = bool(out.get("enabled", True))
-    out["shape"] = str(out.get("shape", "dot")).lower()
-    if out["shape"] not in _VALID_SHAPES:
-        out["shape"] = "dot"
-
-    out["opacity"] = _clamp(float(out.get("opacity", 0.95)), 0.05, 1.0)
-    out["size"] = _clamp(int(out.get("size", 5)), 1, 200)
-    out["thickness"] = _clamp(int(out.get("thickness", 2)), 1, 100)
-    out["gap"] = _clamp(int(out.get("gap", 3)), 0, 200)
-    out["color"] = str(out.get("color", "#a000ff"))
-
-    o = out.get("outline", {})
-    if not isinstance(o, dict):
-        o = {}
-    out["outline"] = {
-        "enabled": bool(o.get("enabled", True)),
-        "color": str(o.get("color", "#000000")),
-        "opacity": _clamp(float(o.get("opacity", 0.80)), 0.0, 1.0),
-        "thickness": _clamp(int(o.get("thickness", 1)), 0, 100),
-    }
-
-    s = out.get("shadow", {})
-    if not isinstance(s, dict):
-        s = {}
-    out["shadow"] = {
-        "enabled": bool(s.get("enabled", False)),
-        "color": str(s.get("color", "#000000")),
-        "opacity": _clamp(float(s.get("opacity", 0.35)), 0.0, 1.0),
-        "offset_x": _clamp(int(s.get("offset_x", 1)), -200, 200),
-        "offset_y": _clamp(int(s.get("offset_y", 1)), -200, 200),
-    }
-
-    mm_raw = str(out.get("monitor_mode", "all"))
-    mm = mm_raw.strip().lower()
-    if mm.startswith("monitor"):
-        digits = ""
-        for ch in mm:
-            if ch.isdigit():
-                digits += ch
-            elif digits:
-                break
-        if digits:
-            out["monitor_mode"] = "index"
-            out["monitor_index"] = int(digits) - 1
-        else:
-            out["monitor_mode"] = "all"
-    elif mm in {"all", "primary", "active", "index", "name"}:
-        out["monitor_mode"] = mm
-    else:
-        out["monitor_mode"] = "all"
-
-    # 255 was unreasonably high; 32 is more than enough for any real setup
-    out["monitor_index"] = _clamp(int(out.get("monitor_index", 0)), 0, 32)
-    out["monitor_name"] = str(out.get("monitor_name", ""))
-    out["preview_bg"] = str(out.get("preview_bg", "#222222"))
-    out["auto_save"] = bool(out.get("auto_save", True))
-
-    if orig is not None:
-        orig.clear()
-        orig.update(out)
-        return orig
-    return out
-
-# --- pid / single-instance
-
-def write_pid_file():
-    p = Path(PID_FILE)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(str(os.getpid()), encoding="utf-8")
-
-def read_pid_file():
+def _validate_desktop_file(path: Path) -> None:
+    exe = shutil.which("desktop-file-validate")
+    if not exe:
+        print(f"Note: desktop-file-validate not found; skipped validation of {path}",
+              file=sys.stderr)
+        return
     try:
-        return int(Path(PID_FILE).read_text(encoding="utf-8").strip())
-    except Exception:
-        return None
+        result = subprocess.run([exe, str(path)], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise core.CoreError(f"Could not run desktop-file-validate: {exc}") from exc
+    if result.returncode != 0:
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+        raise core.CoreError(
+            f"Generated desktop entry failed validation, removed:\n"
+            f"{result.stdout}{result.stderr}".strip()
+        )
 
-def pid_is_alive(pid):
-    try:
-        os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, PermissionError):
-        return False
-    except Exception:
-        return False
-
-def kill_existing_daemon(sock_path=DEFAULT_SOCKET, timeout=2.0):
-    my_pid = os.getpid()
-    killed = False
-
-    sp = Path(sock_path)
-    if sp.exists():
-        ok, _ = ipc_send("quit", sock_path=sock_path, timeout=0.5)
-        if ok:
-            killed = True
-            deadline = time.monotonic() + timeout
-            pid = read_pid_file()
-            while time.monotonic() < deadline:
-                if pid is None or not pid_is_alive(pid) or pid == my_pid:
-                    break
-                time.sleep(0.05)
-
-    pid = read_pid_file()
-    if pid is not None and pid != my_pid and pid > 1 and pid_is_alive(pid):
+def _desktop_dir() -> Path:
+    exe = shutil.which("xdg-user-dir")
+    if exe:
         try:
-            os.kill(pid, signal.SIGTERM)
-            killed = True
-        except Exception:
+            result = subprocess.run([exe, "DESKTOP"], capture_output=True, text=True, timeout=3)
+            candidate = result.stdout.strip()
+            if result.returncode == 0 and candidate:
+                return Path(candidate)
+        except (OSError, subprocess.TimeoutExpired):
             pass
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if not pid_is_alive(pid):
-                break
-            time.sleep(0.05)
-        if pid_is_alive(pid):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except Exception:
-                pass
+    return Path.home() / "Desktop"
 
-    try:
-        if sp.exists():
-            sp.unlink()
-    except Exception:
-        pass
-
-    return killed
-
-def kill_all_python_crosshair():
-    """Kill OTHER processes running this script, never ourselves."""
-    my_pid = os.getpid()
-    my_ppid = os.getppid()
-    script_abs = str(Path(__file__).resolve())
-    script_name = Path(__file__).name
-    victims = set()
-
-    for pattern in [script_abs, script_name]:
-        try:
-            result = subprocess.run(
-                ["pgrep", "-a", "-f", pattern],
-                capture_output=True, text=True, timeout=3,
-            )
-            for line in result.stdout.strip().splitlines():
-                parts = line.split(None, 1)
-                if not parts:
-                    continue
-                try:
-                    pid = int(parts[0])
-                except ValueError:
-                    continue
-                if pid in (my_pid, my_ppid, 0, 1):
-                    continue
-                victims.add(pid)
-        except Exception:
-            pass
-
-    count = 0
-    for pid in victims:
-        try:
-            os.kill(pid, signal.SIGTERM)
-            count += 1
-        except Exception:
-            pass
-
-    if count:
-        time.sleep(0.4)
-        for pid in victims:
-            if pid_is_alive(pid):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except Exception:
-                    pass
-
-    return count
-
-# --- ipc
-
-def ipc_send(command, payload=None, sock_path=DEFAULT_SOCKET, timeout=0.5):
-    msg = {"cmd": command}
-    if payload is not None:
-        msg["payload"] = payload
-    raw = (json.dumps(msg) + "\n").encode("utf-8")
-
-    sp = Path(sock_path)
-    if not sp.exists():
-        return False, "not_running"
-
-    try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(timeout)
-        s.connect(sock_path)
-        s.sendall(raw)
-        try:
-            resp = s.recv(4096)
-        except Exception:
-            resp = b""
-        s.close()
-        return True, resp.decode("utf-8", errors="ignore").strip() or "ok"
-    except Exception as e:
-        return False, str(e)
-
-def ipc_server(sock_path, handler):
-    sp = Path(sock_path)
-    sp.parent.mkdir(parents=True, exist_ok=True)
-    if sp.exists():
-        try:
-            sp.unlink()
-        except Exception:
-            pass
-
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(sock_path)
-    srv.listen(8)
-    os.chmod(sock_path, 0o600)
-
-    while True:
-        try:
-            conn, _ = srv.accept()
-        except Exception:
-            break
-        try:
-            data = b""
-            conn.settimeout(1.0)
-            while True:
-                try:
-                    chunk = conn.recv(4096)
-                except Exception:
-                    break
-                if not chunk:
-                    break
-                data += chunk
-                if b"\n" in data:
-                    break
-
-            line = data.split(b"\n", 1)[0].decode("utf-8", errors="ignore").strip()
-            if not line:
-                conn.sendall(b"empty\n")
-                conn.close()
-                continue
-
-            try:
-                req = json.loads(line)
-            except Exception:
-                conn.sendall(b"bad_json\n")
-                conn.close()
-                continue
-
-            resp = handler(req)
-            if resp is None:
-                resp = "ok"
-            conn.sendall((str(resp) + "\n").encode("utf-8"))
-        except Exception as e:
-            try:
-                conn.sendall((f"error:{e}\n").encode("utf-8"))
-            except Exception:
-                pass
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
-
-    try:
-        srv.close()
-    except Exception:
-        pass
-
-# --- installer
-
-def install_self():
-    install_dir = Path(DEFAULT_INSTALL_DIR)
-    install_dir.mkdir(parents=True, exist_ok=True)
-    target_py = install_dir / f"{APP_ID}.py"
-    src = Path(__file__).resolve()
-    target_py.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-
-    bin_path = Path(DEFAULT_BIN)
-    bin_path.parent.mkdir(parents=True, exist_ok=True)
-    launcher = f"""#!/usr/bin/env bash
-exec python3 "{target_py}" "$@"
-"""
-    bin_path.write_text(launcher, encoding="utf-8")
-    os.chmod(bin_path, 0o755)
-    return str(target_py), str(bin_path)
-
-def install_desktop_shortcut():
-    _, bin_path = install_self()
-    desktop_dir = Path.home() / "Desktop"
-    desktop_dir.mkdir(parents=True, exist_ok=True)
-    shortcut = desktop_dir / f"{APP_ID}.desktop"
-    shortcut.write_text(f"""[Desktop Entry]
-Version=1.0
-Type=Application
-Name={APP_NAME}
-Comment=Crosshair overlay -- click to open settings
-Exec={bin_path}
-Icon=crosshairs
-Terminal=false
-Categories=Utility;
-StartupNotify=false
-""", encoding="utf-8")
-    os.chmod(shortcut, 0o755)
-    return str(shortcut)
-
-def install_autostart():
-    _, bin_path = install_self()
-    unit_dir = Path.home() / ".config" / "systemd" / "user"
-    unit_dir.mkdir(parents=True, exist_ok=True)
-    unit_path = unit_dir / f"{APP_ID}.service"
-    unit_path.write_text(f"""[Unit]
-Description={APP_NAME} overlay
-After=graphical-session.target
-
-[Service]
-Type=simple
-ExecStart={bin_path} --daemon --no-ui
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=default.target
-""", encoding="utf-8")
-
-    autostart_dir = Path.home() / ".config" / "autostart"
-    autostart_dir.mkdir(parents=True, exist_ok=True)
-    desktop_path = autostart_dir / f"{APP_ID}.desktop"
-    desktop_path.write_text(f"""[Desktop Entry]
-Type=Application
-Name={APP_NAME}
-Exec={bin_path} --daemon --no-ui
-X-KDE-autostart-after=panel
-X-KDE-StartupNotify=false
-NoDisplay=true
-""", encoding="utf-8")
-
-    sysd_ok = False
-    try:
-        subprocess.run(["systemctl", "--user", "daemon-reload"], check=False,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["systemctl", "--user", "enable", "--now", f"{APP_ID}.service"],
-                       check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        sysd_ok = True
-    except Exception:
-        sysd_ok = False
-
-    return str(unit_path), str(desktop_path), sysd_ok, bin_path
-
-def uninstall_autostart():
-    try:
-        subprocess.run(["systemctl", "--user", "disable", "--now", f"{APP_ID}.service"],
-                       check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["systemctl", "--user", "daemon-reload"], check=False,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
-
+def _remove_legacy_systemd_unit() -> list[str]:
+    """Remove the v3.1 systemd user service, if present (C-03 migration)."""
     removed = []
-    for p in [
-        Path.home() / ".config" / "systemd" / "user" / f"{APP_ID}.service",
-        Path.home() / ".config" / "autostart" / f"{APP_ID}.desktop",
-    ]:
-        if p.exists():
-            try:
-                p.unlink()
-                removed.append(str(p))
-            except Exception:
-                pass
+    unit = Path.home() / ".config" / "systemd" / "user" / f"{APP_ID}.service"
+    if unit.exists():
+        try:
+            subprocess.run(["systemctl", "--user", "disable", "--now", f"{APP_ID}.service"],
+                           check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=5)
+            subprocess.run(["systemctl", "--user", "daemon-reload"], check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        try:
+            unit.unlink()
+            removed.append(str(unit))
+        except OSError:
+            pass
     return removed
 
-# === daemon (GTK overlay + UI)
+def _migrate_legacy_config(paths: core.AppPaths, log: logging.Logger) -> None:
+    """One-time copy from the old purplecrosshair config location.
 
-def run_daemon(open_config=False):
+    Explicit and logged, called only from run_daemon() startup -- never at
+    import time, so --help/--doctor/--status never touch the filesystem
+    for this.
+    """
+    old_config = paths.home / ".config" / "purplecrosshair" / "config.json"
+    if not old_config.exists() or paths.config_file.exists():
+        return
+    if old_config.is_symlink():
+        log.warning("Skipping legacy config migration: source is a symlink (%s)", old_config)
+        return
+    try:
+        data = old_config.read_bytes()
+        core.atomic_write_bytes(paths.config_file, data, mode=0o600)
+        log.info("Migrated legacy config from %s to %s", old_config, paths.config_file)
+    except OSError as exc:
+        log.warning("Legacy config migration failed: %s", exc)
+
+def install_self(paths: core.AppPaths) -> tuple[Path, Path]:
+    src = Path(__file__).resolve()
+    if src.is_symlink():
+        raise core.CoreError(f"Refusing to install from symlink source: {src}")
+    core.atomic_write_bytes(paths.installed_source, src.read_bytes(), mode=0o644)
+    launcher = f'#!/usr/bin/env bash\nexec python3 "{paths.installed_source}" "$@"\n'
+    core.atomic_write_text(paths.bin_file, launcher, mode=0o755)
+    app_entry = (
+        "[Desktop Entry]\n"
+        "Version=1.0\n"
+        "Type=Application\n"
+        f"Name={APP_NAME}\n"
+        "Comment=Crosshair overlay for games without a built-in reticle\n"
+        f"Exec={_desktop_entry_exec(paths.bin_file)}\n"
+        "Icon=input-gaming\n"
+        "Terminal=false\n"
+        "Categories=Game;\n"
+        "StartupNotify=false\n"
+    )
+    core.atomic_write_text(paths.application_entry, app_entry, mode=0o644)
+    _validate_desktop_file(paths.application_entry)
+    return paths.installed_source, paths.bin_file
+
+def install_autostart(paths: core.AppPaths, log: logging.Logger | None = None) -> tuple[Path, Path]:
+    _, bin_path = install_self(paths)
+    content = (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Version=1.0\n"
+        f"Name={APP_NAME}\n"
+        "Comment=Crosshair overlay\n"
+        f"TryExec={bin_path}\n"
+        f"Exec={_desktop_entry_exec(bin_path)}\n"
+        "Icon=input-gaming\n"
+        "Terminal=false\n"
+        "Categories=Utility;\n"
+        "StartupNotify=false\n"
+        "X-KDE-autostart-after=panel\n"
+        "NoDisplay=true\n"
+    )
+    core.atomic_write_text(paths.autostart_entry, content, mode=0o644)
+    _validate_desktop_file(paths.autostart_entry)
+    removed_legacy = _remove_legacy_systemd_unit()
+    if removed_legacy and log:
+        log.info("Removed legacy systemd autostart unit(s): %s", removed_legacy)
+    return bin_path, paths.autostart_entry
+
+def install_desktop_shortcut(paths: core.AppPaths) -> Path:
+    _, bin_path = install_self(paths)
+    desktop_dir = _desktop_dir()
+    if desktop_dir.is_symlink():
+        raise core.CoreError(f"Refusing symlink desktop directory: {desktop_dir}")
+    desktop_dir.mkdir(parents=True, exist_ok=True)
+    shortcut = desktop_dir / f"{APP_ID}.desktop"
+    content = (
+        "[Desktop Entry]\n"
+        "Version=1.0\n"
+        "Type=Application\n"
+        f"Name={APP_NAME}\n"
+        "Comment=Crosshair overlay -- click to open settings\n"
+        f"Exec={_desktop_entry_exec(bin_path)}\n"
+        "Icon=input-gaming\n"
+        "Terminal=false\n"
+        "Categories=Utility;\n"
+        "StartupNotify=false\n"
+    )
+    core.atomic_write_text(shortcut, content, mode=0o755)
+    _validate_desktop_file(shortcut)
+    return shortcut
+
+def uninstall_app(paths: core.AppPaths) -> list[str]:
+    removed = []
+    targets = (
+        paths.autostart_entry, paths.application_entry, paths.bin_file, paths.installed_source,
+    )
+    for p in targets:
+        try:
+            if p.exists() or p.is_symlink():
+                p.unlink()
+                removed.append(str(p))
+        except OSError:
+            pass
+    removed += _remove_legacy_systemd_unit()
+    for d in (paths.installed_source.parent, paths.application_entry.parent):
+        try:
+            if d.exists() and not any(d.iterdir()):
+                d.rmdir()
+        except OSError:
+            pass
+    return removed
+
+def purge_config(paths: core.AppPaths) -> list[str]:
+    removed = []
+    try:
+        if paths.config_dir.exists():
+            for p in sorted(paths.config_dir.glob("*")):
+                if p.is_file() or p.is_symlink():
+                    p.unlink()
+                    removed.append(str(p))
+            if not any(paths.config_dir.iterdir()):
+                paths.config_dir.rmdir()
+                removed.append(str(paths.config_dir))
+    except OSError as exc:
+        print(f"Could not fully purge config: {exc}", file=sys.stderr)
+    return removed
+
+def start_daemon_background(paths: core.AppPaths) -> bool:
+    try:
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "--daemon", "--no-ui"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True
+    except OSError:
+        return False
+
+# --- doctor ---------------------------------------------------------------
+
+def doctor(paths: core.AppPaths) -> int:
+    mandatory_ok = True
+    lines = [f"{APP_NAME} v{APP_VERSION} doctor"]
+    session_hint = os.environ.get("XDG_SESSION_TYPE", "").strip().lower()
+    lines.append(f"XDG_SESSION_TYPE (hint only, not authoritative): {session_hint or '(unset)'}")
+    lines.append(f"Config:   {paths.config_file}")
+    lines.append(f"Socket:   {paths.socket_file}")
+    lines.append(f"Lock:     {paths.lock_file}")
+    lines.append(f"Log:      {paths.log_file}")
+    if paths.runtime_fallback:
+        lines.append("WARNING: XDG_RUNTIME_DIR is unset/invalid; using a private cache "
+                      "fallback. A normal desktop login should provide a valid runtime dir.")
+
+    checks = [
+        ("GTK3",          "Gtk",           "3.0", True),
+        ("Gdk",           "Gdk",           "3.0", True),
+        ("pycairo",       None,            None,  True),
+        ("GtkLayerShell", "GtkLayerShell", "0.1", session_hint == "wayland"),
+    ]
+    try:
+        import gi
+    except Exception as exc:
+        lines.append(f"  [MISS] PyGObject (MANDATORY): {exc}")
+        mandatory_ok = False
+        gi = None
+
+    for label, ns, ver, mandatory in checks:
+        try:
+            if ns is None:
+                importlib.import_module("cairo")
+            else:
+                if gi is None:
+                    raise RuntimeError("PyGObject not available")
+                gi.require_version(ns, ver)
+                importlib.import_module(f"gi.repository.{ns}")
+            lines.append(f"  [OK]   {label}")
+        except Exception as exc:
+            marker = "MANDATORY" if mandatory else "optional"
+            lines.append(f"  [MISS] {label} ({marker}): {exc}")
+            if mandatory:
+                mandatory_ok = False
+
+    tray_ok = False
+    if gi is not None:
+        for ns in ("AyatanaAppIndicator3", "AppIndicator3"):
+            try:
+                gi.require_version(ns, "0.1")
+                importlib.import_module(f"gi.repository.{ns}")
+                lines.append(f"  [OK]   tray via {ns}")
+                tray_ok = True
+                break
+            except Exception:
+                continue
+    if not tray_ok:
+        lines.append("  [WARN] no AppIndicator backend found; tray falls back to Gtk.StatusIcon "
+                      "(this never blocks the overlay)")
+
+    try:
+        response = core.ipc_call(paths, {"cmd": "status"}, timeout=0.5)
+        lines.append(f"Daemon:   running (pid {response.get('pid', '?')}, "
+                      f"backend={response.get('backend', '?')}, "
+                      f"layershell={response.get('layershell', '?')})")
+    except core.IpcUnavailable:
+        lines.append("Daemon:   not running")
+
+    print("\n".join(lines))
+    return 0 if mandatory_ok else 1
+
+# --- daemon (GTK overlay + UI) --------------------------------------------
+
+def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = False) -> int:
     import warnings
     warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-    # single-instance: kill any stale/zombie previous copies
-    kill_all_python_crosshair()
-    kill_existing_daemon()
-    # wait briefly for killed processes to release the socket
-    sock_path_check = Path(DEFAULT_SOCKET)
-    _deadline = time.monotonic() + 1.5
-    while time.monotonic() < _deadline and sock_path_check.exists():
-        time.sleep(0.05)
+    log = core.setup_logging(paths, verbose=verbose)
+    log.info("Starting %s v%s (pid %s)", APP_NAME, APP_VERSION, os.getpid())
+    if paths.runtime_fallback:
+        log.warning("XDG_RUNTIME_DIR unset/invalid; using private fallback: %s", paths.runtime_dir)
+
+    _migrate_legacy_config(paths, log)
 
     try:
         import gi
         gi.require_version("Gtk", "3.0")
         gi.require_version("Gdk", "3.0")
-        from gi.repository import Gtk, Gdk, GLib
-    except Exception as e:
-        print("GTK3 (PyGObject) is not available. Install python3-gobject + gtk3.",
-              file=sys.stderr)
-        print(str(e), file=sys.stderr)
+        from gi.repository import Gdk, GLib, GObject, Gtk
+    except Exception as exc:
+        msg = "GTK3 (PyGObject) is not available. Install python3-gobject + gtk3."
+        print(msg, file=sys.stderr)
+        print(str(exc), file=sys.stderr)
+        log.error("%s -- %s", msg, exc)
         return 2
 
-    # suppress harmless GTK icon-theme warnings (C-level, not catchable with warnings module)
     try:
         def _gtk_log_suppress(domain, level, message, user_data):
             pass
@@ -533,37 +376,136 @@ def run_daemon(open_config=False):
     except Exception:
         pass
 
+    try:
+        import cairo
+    except Exception as exc:
+        msg = "pycairo is not available. Install python3-cairo / python3-gi-cairo."
+        print(msg, file=sys.stderr)
+        print(str(exc), file=sys.stderr)
+        log.error("%s -- %s", msg, exc)
+        return 2
+
+    display = Gdk.Display.get_default()
+    if display is None:
+        msg = "No graphical display detected."
+        print(msg, file=sys.stderr)
+        log.error(msg)
+        return 2
+
+    def _detect_backend(disp):
+        # The GObject type name is intrinsic to the C library and is reliable
+        # even when the optional GdkWayland/GdkX11 GI namespaces aren't
+        # installed -- unlike $XDG_SESSION_TYPE, which can disagree with the
+        # actual GDK backend under XWayland.
+        try:
+            type_name = GObject.type_name(disp)
+        except Exception:
+            type_name = type(disp).__name__
+        lowered = type_name.lower()
+        for key in ("wayland", "x11", "broadway", "win32", "quartz"):
+            if key in lowered:
+                return key
+        return os.environ.get("XDG_SESSION_TYPE", "").strip().lower() or "unknown"
+
+    backend = _detect_backend(display)
+    is_wayland = (backend == "wayland")
+    log.info("Detected GDK backend: %s", backend)
+
     HAVE_LAYERSHELL = False
     GtkLayerShell = None
     try:
         gi.require_version("GtkLayerShell", "0.1")
         from gi.repository import GtkLayerShell as _GtkLayerShell
         GtkLayerShell = _GtkLayerShell
-        HAVE_LAYERSHELL = True
+        HAVE_LAYERSHELL = bool(GtkLayerShell.is_supported()) if hasattr(
+            GtkLayerShell, "is_supported") else True
     except Exception:
         HAVE_LAYERSHELL = False
 
+    if is_wayland and not HAVE_LAYERSHELL:
+        msg = ("Native Wayland session detected but GTK Layer Shell is unavailable or "
+               "unsupported by this compositor. Install gtk-layer-shell (Nobara/Fedora: "
+               "'sudo dnf install gtk-layer-shell') and retry. Refusing to fall back to an "
+               "unmanaged window that cannot guarantee placement/stacking.")
+        print(msg, file=sys.stderr)
+        log.error(msg)
+        return 2
+    use_layershell = bool(is_wayland and HAVE_LAYERSHELL)
+
     HAVE_APPINDICATOR = False
     AppIndicator3 = None
-    try:
-        gi.require_version("AppIndicator3", "0.1")
-        from gi.repository import AppIndicator3 as _AppIndicator3
-        AppIndicator3 = _AppIndicator3
-        HAVE_APPINDICATOR = True
-    except Exception:
-        HAVE_APPINDICATOR = False
+    for _ns in ("AyatanaAppIndicator3", "AppIndicator3"):
+        try:
+            gi.require_version(_ns, "0.1")
+            AppIndicator3 = importlib.import_module(f"gi.repository.{_ns}")
+            HAVE_APPINDICATOR = True
+            log.info("Tray backend: %s", _ns)
+            break
+        except Exception:
+            continue
+    if not HAVE_APPINDICATOR:
+        log.info("No AppIndicator backend found; tray falls back to Gtk.StatusIcon")
 
-    cfg_path = DEFAULT_CONFIG
-    cfg = load_config(cfg_path)
-
     try:
-        import cairo
-    except Exception as e:
-        print("pycairo is not available. Install python3-cairo.", file=sys.stderr)
-        print(str(e), file=sys.stderr)
+        core.ensure_runtime(paths)
+    except core.CoreError as exc:
+        print(str(exc), file=sys.stderr)
+        log.error(str(exc))
         return 2
 
-    write_pid_file()
+    result = core.load_config(paths.config_file, log)
+    cfg = result.config
+    _cfg_fingerprint = [core.file_fingerprint(paths.config_file)]
+
+    def _save_cfg():
+        core.save_config(cfg, paths.config_file)
+        _cfg_fingerprint[0] = core.file_fingerprint(paths.config_file)
+
+    def _save_if_needed(was_auto_save: bool, now_auto_save: bool):
+        # Always save when auto-save is on, AND force one save on the
+        # on->off transition so that turning auto-save off is itself
+        # persisted (H-03) -- otherwise the fact that it's now off would
+        # only reach disk on some later externally-triggered save. Shared
+        # by both the settings-window debounce handler and the IPC "set"
+        # command, which can independently flip auto_save.
+        if now_auto_save or (was_auto_save and not now_auto_save):
+            _save_cfg()
+
+    # Acquire the single-instance lock and bind the IPC socket now -- BEFORE
+    # building any windows, the settings UI, or the tray. A duplicate launch
+    # must fail fast here without doing GTK/tray/D-Bus work (tray setup can
+    # block for seconds, or hang entirely, on a system with no session bus).
+    # handle_ipc references cfg/apply_config/settings_window/etc. that don't
+    # exist yet -- that's fine, since IpcServer only calls the dispatcher
+    # once a real request arrives, and _ipc_handler_ref is filled in once
+    # handle_ipc is fully defined further down, well before Gtk.main() runs.
+    _ipc_handler_ref = {"fn": None}
+
+    def _dispatch_ipc(req):
+        fn = _ipc_handler_ref["fn"]
+        if fn is None:
+            return {"ok": False, "message": "daemon is still starting up"}
+        return fn(req)
+
+    server = core.IpcServer(paths, _dispatch_ipc, log)
+    try:
+        server.start()
+    except core.AlreadyRunning:
+        msg = f"{APP_NAME} daemon is already running (lock held: {paths.lock_file})."
+        print(msg, file=sys.stderr)
+        log.error(msg)
+        return 3
+    except core.CoreError as exc:
+        print(str(exc), file=sys.stderr)
+        log.error(str(exc))
+        return 2
+
+    def _wrap_scrollable(widget):
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_min_content_height(260)
+        scrolled.add(widget)
+        return scrolled
 
     # === shared crosshair drawing
     # Used by both the overlay window and the settings preview.
@@ -601,16 +543,24 @@ def run_daemon(open_config=False):
             cr.set_line_width(max(0.5, width))
             if shape in ("cross", "cross_dot", "plus"):
                 g = 0.0 if shape == "plus" else gap
-                cr.move_to(cx+dx,   cy+dy-g);       cr.line_to(cx+dx,   cy+dy-(g+size))
-                cr.move_to(cx+dx,   cy+dy+g);       cr.line_to(cx+dx,   cy+dy+(g+size))
-                cr.move_to(cx+dx-g, cy+dy);         cr.line_to(cx+dx-(g+size), cy+dy)
-                cr.move_to(cx+dx+g, cy+dy);         cr.line_to(cx+dx+(g+size), cy+dy)
+                cr.move_to(cx+dx,   cy+dy-g)
+                cr.line_to(cx+dx,   cy+dy-(g+size))
+                cr.move_to(cx+dx,   cy+dy+g)
+                cr.line_to(cx+dx,   cy+dy+(g+size))
+                cr.move_to(cx+dx-g, cy+dy)
+                cr.line_to(cx+dx-(g+size), cy+dy)
+                cr.move_to(cx+dx+g, cy+dy)
+                cr.line_to(cx+dx+(g+size), cy+dy)
                 cr.stroke()
             if shape in ("x", "x_dot"):
-                cr.move_to(cx+dx-gap, cy+dy-gap);   cr.line_to(cx+dx-(gap+size), cy+dy-(gap+size))
-                cr.move_to(cx+dx+gap, cy+dy+gap);   cr.line_to(cx+dx+(gap+size), cy+dy+(gap+size))
-                cr.move_to(cx+dx-gap, cy+dy+gap);   cr.line_to(cx+dx-(gap+size), cy+dy+(gap+size))
-                cr.move_to(cx+dx+gap, cy+dy-gap);   cr.line_to(cx+dx+(gap+size), cy+dy-(gap+size))
+                cr.move_to(cx+dx-gap, cy+dy-gap)
+                cr.line_to(cx+dx-(gap+size), cy+dy-(gap+size))
+                cr.move_to(cx+dx+gap, cy+dy+gap)
+                cr.line_to(cx+dx+(gap+size), cy+dy+(gap+size))
+                cr.move_to(cx+dx-gap, cy+dy+gap)
+                cr.line_to(cx+dx-(gap+size), cy+dy+(gap+size))
+                cr.move_to(cx+dx+gap, cy+dy-gap)
+                cr.line_to(cx+dx+(gap+size), cy+dy-(gap+size))
                 cr.stroke()
             if shape in ("ring", "circle", "dot_ring"):
                 cr.arc(cx+dx, cy+dy, max(1.0, size), 0.0, math.tau)
@@ -693,6 +643,7 @@ def run_daemon(open_config=False):
             self.add(self.darea)
 
             self._apply_window_rules()
+            self.connect("configure-event", self._on_configure)
             self._apply_size_and_position()
             self.show_all()
 
@@ -703,10 +654,8 @@ def run_daemon(open_config=False):
                 try:
                     GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.NONE)
                 except AttributeError:
-                    try:
+                    with contextlib.suppress(Exception):
                         GtkLayerShell.set_keyboard_interactivity(self, False)
-                    except Exception:
-                        pass
                 GtkLayerShell.set_monitor(self, self.monitor)
                 GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.TOP, True)
                 GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.LEFT, True)
@@ -715,25 +664,25 @@ def run_daemon(open_config=False):
                 GtkLayerShell.set_exclusive_zone(self, -1)
             else:
                 # X11: UTILITY type floats on top without full WM management
-                try:
+                with contextlib.suppress(Exception):
                     self.set_type_hint(Gdk.WindowTypeHint.UTILITY)
-                except Exception:
-                    pass
-                try:
+                with contextlib.suppress(Exception):
                     self.set_keep_above(True)
-                except Exception:
-                    pass
 
-            # pass all mouse events through the canvas to whatever is below
-            # on X11 this is critical -- without it the canvas intercepts clicks
-            # on Wayland/layershell this is a no-op (safe to call either way)
+            # pass all mouse events through the canvas to whatever is below.
+            # Applied at realize AND after map -- some compositors reset the
+            # input region on the first map, so a single realize-time call
+            # isn't always enough (H item: click-through must survive map).
             self.connect("realize", self._on_realize_passthrough)
+            self.connect("map-event", self._on_realize_passthrough)
 
         def _on_realize_passthrough(self, *_):
             try:
                 self.input_shape_combine_region(cairo.Region())
+                log.debug("Applied empty input region (click-through) for %s", self)
             except Exception:
-                pass
+                log.exception("Failed to apply empty input region -- clicks may be captured")
+            return False
 
         def _canvas_size_px(self):
             c = cfg
@@ -756,22 +705,40 @@ def run_daemon(open_config=False):
                 ext = (gap + size) + thick + outline_thick + shadow_pad
             return max(16, int(ext * 2 + 8))
 
-        def _apply_size_and_position(self):
-            canvas = self._canvas_size_px()
-            self.set_default_size(canvas, canvas)
-            self.darea.set_size_request(canvas, canvas)
+        def _recenter(self, w, h):
             try:
                 geo = self.monitor.get_geometry()
-                x_margin = int((geo.width - canvas) / 2)
-                y_margin = int((geo.height - canvas) / 2)
+                x_margin = int((geo.width - w) / 2)
+                y_margin = int((geo.height - h) / 2)
                 if self.use_layershell:
                     GtkLayerShell.set_margin(self, GtkLayerShell.Edge.LEFT, max(0, x_margin))
                     GtkLayerShell.set_margin(self, GtkLayerShell.Edge.TOP, max(0, y_margin))
                 else:
                     self.move(geo.x + x_margin, geo.y + y_margin)
             except Exception:
-                pass
+                log.exception("Failed to recenter overlay window")
+
+        def _apply_size_and_position(self):
+            canvas = self._canvas_size_px()
+            self.set_default_size(canvas, canvas)
+            self.darea.set_size_request(canvas, canvas)
+            try:
+                if self.get_realized():
+                    self.resize(canvas, canvas)
+            except Exception:
+                log.exception("resize() failed for overlay window")
+            # Recenter immediately from the requested size; the
+            # configure-event handler below will correct this again once
+            # the compositor reports the *actual* allocation (H-12: don't
+            # trust set_default_size as a guaranteed live resize).
+            self._recenter(canvas, canvas)
             self.queue_draw()
+
+        def _on_configure(self, widget, event):
+            alloc = self.get_allocation()
+            if alloc.width > 1 and alloc.height > 1:
+                self._recenter(alloc.width, alloc.height)
+            return False
 
         def apply_config(self):
             self._apply_size_and_position()
@@ -795,15 +762,6 @@ def run_daemon(open_config=False):
             return False
 
     # === app state
-
-    is_wayland = (os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland")
-    display = Gdk.Display.get_default()
-    if is_wayland and not HAVE_LAYERSHELL:
-        print("Wayland: GtkLayerShell not available. Install gtk-layer-shell.",
-              file=sys.stderr)
-    if display is None:
-        print("No graphical display detected.", file=sys.stderr)
-        return 2
 
     _mon_name_cache = {}
 
@@ -839,10 +797,8 @@ def run_daemon(open_config=False):
         except Exception:
             n = 0
         for i in range(n):
-            try:
+            with contextlib.suppress(Exception):
                 mons.append(display.get_monitor(i))
-            except Exception:
-                pass
         return mons
 
     def get_monitor_choices_for_ui():
@@ -909,12 +865,9 @@ def run_daemon(open_config=False):
     def rebuild_windows():
         nonlocal windows
         for w in windows:
-            try:
+            with contextlib.suppress(Exception):
                 w.destroy()
-            except Exception:
-                pass
         windows = []
-        use_layershell = bool(is_wayland and HAVE_LAYERSHELL)
         for mon in get_monitors():
             windows.append(OverlayWindow(mon, is_wayland=is_wayland,
                                          use_layershell=use_layershell))
@@ -927,10 +880,22 @@ def run_daemon(open_config=False):
 
     def request_quit():
         for cb in list(_quit_callbacks):
-            try:
+            with contextlib.suppress(Exception):
                 cb()
-            except Exception:
-                pass
+
+    # holds the restart hand-off guard fd between _restart() and the
+    # cleanup block after Gtk.main() returns (item 18: pipe-EOF handoff)
+    _restart_guard = {"fd": None}
+
+    def _reload_cfg_and_sync():
+        r = core.load_config(paths.config_file, log)
+        cfg.clear()
+        cfg.update(r.config)
+        _cfg_fingerprint[0] = core.file_fingerprint(paths.config_file)
+        apply_config(rebuild=True)
+        settings_window._sync_ui_from_cfg()
+        if r.recovered:
+            log.warning("Reload recovered from invalid config: %s", r.error)
 
     # === settings window
 
@@ -964,8 +929,8 @@ def run_daemon(open_config=False):
 
             self.btn_restart = Gtk.Button(label="↺ Restart")
             self.btn_restart.set_tooltip_text(
-                "Saves config, kills all running instances, and re-launches fresh.\n"
-                "Use this if the UI becomes unresponsive."
+                "Saves config, then hands off to a fresh daemon once this one\n"
+                "has fully exited (no other running instances are touched)."
             )
             self.btn_restart.connect("clicked", lambda *_: self._restart())
             hb.pack_start(self.btn_restart, False, False, 0)
@@ -984,7 +949,7 @@ def run_daemon(open_config=False):
             # tab: General
             tab_gen = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
             tab_gen.set_border_width(10)
-            nb.append_page(tab_gen, Gtk.Label(label="General"))
+            nb.append_page(_wrap_scrollable(tab_gen), Gtk.Label(label="General"))
 
             self.chk_enabled = Gtk.CheckButton(label="Enabled")
             self.chk_enabled.set_active(bool(cfg.get("enabled", True)))
@@ -1008,7 +973,8 @@ def run_daemon(open_config=False):
             self.cmb_shape = Gtk.ComboBoxText()
             for s in SHAPES:
                 self.cmb_shape.append_text(s)
-            active_idx = SHAPES.index(cfg.get("shape", "dot")) if cfg.get("shape", "dot") in SHAPES else 0
+            _cur_shape = cfg.get("shape", "dot")
+            active_idx = SHAPES.index(_cur_shape) if _cur_shape in SHAPES else 0
             self.cmb_shape.set_active(active_idx)
             self.cmb_shape.connect("changed", lambda *_: self._changed())
             row_shape.pack_end(self.cmb_shape, False, False, 0)
@@ -1048,12 +1014,14 @@ def run_daemon(open_config=False):
             # tab: Appearance
             tab_app = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
             tab_app.set_border_width(10)
-            nb.append_page(tab_app, Gtk.Label(label="Appearance"))
+            nb.append_page(_wrap_scrollable(tab_app), Gtk.Label(label="Appearance"))
 
             self.scale_opacity = self._add_scale(tab_app, "Opacity", 0.05, 1.0,
                                                   cfg.get("opacity", 0.95), step=0.01)
             self.scale_size = self._add_scale(tab_app, "Size", 1, 200, cfg.get("size", 5))
-            self.scale_thick = self._add_scale(tab_app, "Thickness", 1, 100, cfg.get("thickness", 2))
+            self.scale_thick = self._add_scale(
+                tab_app, "Thickness", 1, 100, cfg.get("thickness", 2)
+            )
             self.scale_gap = self._add_scale(tab_app, "Gap", 0, 200, cfg.get("gap", 3))
 
             row_col = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -1142,7 +1110,7 @@ def run_daemon(open_config=False):
             # tab: Preview
             tab_prev = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
             tab_prev.set_border_width(10)
-            nb.append_page(tab_prev, Gtk.Label(label="Preview"))
+            nb.append_page(_wrap_scrollable(tab_prev), Gtk.Label(label="Preview"))
 
             self.preview = Gtk.DrawingArea()
             self.preview.set_size_request(240, 240)
@@ -1163,7 +1131,7 @@ def run_daemon(open_config=False):
             # tab: Hotkeys & Autostart
             tab_hot = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
             tab_hot.set_border_width(10)
-            nb.append_page(tab_hot, Gtk.Label(label="Hotkeys & Autostart"))
+            nb.append_page(_wrap_scrollable(tab_hot), Gtk.Label(label="Hotkeys & Autostart"))
 
             lbl = Gtk.Label()
             lbl.set_xalign(0)
@@ -1204,13 +1172,11 @@ def run_daemon(open_config=False):
             # tab: System
             tab_sys = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
             tab_sys.set_border_width(10)
-            nb.append_page(tab_sys, Gtk.Label(label="System"))
+            nb.append_page(_wrap_scrollable(tab_sys), Gtk.Label(label="System"))
 
             btn_cfg_folder = Gtk.Button(label="📁 Open Config Folder")
-            btn_cfg_folder.set_tooltip_text(str(Path(DEFAULT_CONFIG).parent))
-            btn_cfg_folder.connect("clicked", lambda *_: self._open_folder(
-                str(Path(DEFAULT_CONFIG).parent)
-            ))
+            btn_cfg_folder.set_tooltip_text(str(paths.config_dir))
+            btn_cfg_folder.connect("clicked", lambda *_: self._open_folder(str(paths.config_dir)))
             tab_sys.pack_start(btn_cfg_folder, False, False, 0)
 
             btn_script = Gtk.Button(label="📄 Open Script Location")
@@ -1231,13 +1197,13 @@ def run_daemon(open_config=False):
             btn_reload.connect("clicked", lambda *_: self._reload_config())
             tab_sys.pack_start(btn_reload, False, False, 0)
 
-            btn_kill_restart = Gtk.Button(label="☠ Kill All & Restart Fresh")
-            btn_kill_restart.set_tooltip_text(
-                "Kills every running instance of this script (including this one),\n"
-                "then re-launches a fresh copy."
+            btn_uninstall_app = Gtk.Button(label="🗑 Uninstall App")
+            btn_uninstall_app.set_tooltip_text(
+                "Removes the installed script, launcher, app-menu entry, and\n"
+                "autostart entry. Your config file is kept."
             )
-            btn_kill_restart.connect("clicked", lambda *_: self._kill_all_restart())
-            tab_sys.pack_start(btn_kill_restart, False, False, 0)
+            btn_uninstall_app.connect("clicked", lambda *_: self._uninstall_app())
+            tab_sys.pack_start(btn_uninstall_app, False, False, 0)
 
             sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
             tab_sys.pack_start(sep, False, False, 0)
@@ -1246,9 +1212,10 @@ def run_daemon(open_config=False):
             info.set_xalign(0)
             info.set_line_wrap(True)
             info.set_markup(
-                f"<b>Config:</b> <tt>{DEFAULT_CONFIG}</tt>\n"
-                f"<b>Socket:</b> <tt>{DEFAULT_SOCKET}</tt>\n"
-                f"<b>PID file:</b> <tt>{PID_FILE}</tt>\n"
+                f"<b>Config:</b> <tt>{paths.config_file}</tt>\n"
+                f"<b>Socket:</b> <tt>{paths.socket_file}</tt>\n"
+                f"<b>Lock:</b> <tt>{paths.lock_file}</tt>\n"
+                f"<b>Log:</b> <tt>{paths.log_file}</tt>\n"
                 f"<b>Version:</b> {APP_VERSION}"
             )
             info.set_selectable(True)
@@ -1278,16 +1245,17 @@ def run_daemon(open_config=False):
                     f"#{i+1} {monitor_pretty_name(m)}" for i, m in enumerate(mons)
                 )
                 enabled = "ON" if cfg.get("enabled", True) else "OFF"
+                backend_info = f"{backend}{'+layershell' if use_layershell else ''}"
                 self.statusbar.set_text(
-                    f"Crosshair: {enabled}  |  {len(mons)} monitor(s): {mon_info}"
+                    f"Crosshair: {enabled}  |  {backend_info}  |  "
+                    f"{len(mons)} monitor(s): {mon_info}"
                 )
             except Exception:
                 pass
 
         def _launcher_hint(self):
-            binp = Path(DEFAULT_BIN)
-            if binp.exists():
-                return str(binp)
+            if paths.bin_file.exists():
+                return str(paths.bin_file)
             return f'python3 "{Path(__file__).resolve()}"'
 
         def _copy_text(self, text):
@@ -1299,28 +1267,52 @@ def run_daemon(open_config=False):
                 pass
 
         def _open_folder(self, path):
-            try:
+            with contextlib.suppress(Exception):
                 subprocess.Popen(["xdg-open", path])
-            except Exception:
-                pass
 
         def _edit_config(self):
-            save_config(cfg, cfg_path)
-            try:
-                subprocess.Popen(["xdg-open", DEFAULT_CONFIG])
-            except Exception:
-                pass
+            _save_cfg()
+            with contextlib.suppress(Exception):
+                subprocess.Popen(["xdg-open", str(paths.config_file)])
 
         def _install_autostart(self):
-            unit_path, desktop_path, sysd_ok, bin_path = install_autostart()
-            msg = f"Installed:\n  {bin_path}\n  {unit_path}\n  {desktop_path}\n"
-            msg += "\nSystemd autostart: " + ("enabled." if sysd_ok else "fallback .desktop created.")
+            try:
+                bin_path, autostart_path = install_autostart(paths, log)
+            except core.CoreError as exc:
+                self._info_dialog("Install failed", str(exc))
+                return
+            msg = (f"Installed:\n  {bin_path}\n  {autostart_path}\n\n"
+                   "Autostart: XDG autostart entry enabled (no systemd unit used).")
             self._info_dialog("Install complete", msg)
 
         def _remove_autostart(self):
-            removed = uninstall_autostart()
+            removed = []
+            try:
+                if paths.autostart_entry.exists() or paths.autostart_entry.is_symlink():
+                    paths.autostart_entry.unlink()
+                    removed.append(str(paths.autostart_entry))
+            except OSError:
+                pass
+            removed += _remove_legacy_systemd_unit()
             msg = "Removed:\n" + ("\n".join(removed) if removed else "(nothing found)")
             self._info_dialog("Autostart removed", msg)
+
+        def _uninstall_app(self):
+            dlg = Gtk.MessageDialog(
+                parent=self, modal=True, message_type=Gtk.MessageType.QUESTION,
+                buttons=Gtk.ButtonsType.YES_NO, text="Uninstall Crosshair?",
+            )
+            dlg.format_secondary_text(
+                "This removes the installed script, launcher, app-menu entry, and "
+                "autostart entry. Your configuration file is kept.\n"
+                "The currently running overlay keeps running until you quit it."
+            )
+            resp = dlg.run()
+            dlg.destroy()
+            if resp == Gtk.ResponseType.YES:
+                removed = uninstall_app(paths)
+                msg = "Removed:\n" + ("\n".join(removed) if removed else "(nothing found)")
+                self._info_dialog("Uninstalled", msg)
 
         def _info_dialog(self, title, body):
             dlg = Gtk.MessageDialog(parent=self, modal=True,
@@ -1372,79 +1364,33 @@ def run_daemon(open_config=False):
             resp = dlg.run()
             dlg.destroy()
             if resp == Gtk.ResponseType.YES:
-                new_cfg = default_config()
-                save_config(new_cfg, cfg_path)
-                loaded = load_config(cfg_path)
                 cfg.clear()
-                cfg.update(loaded)
+                cfg.update(core.default_config())
+                _save_cfg()
                 apply_config(rebuild=True)
                 self._sync_ui_from_cfg()
 
         def _reload_config(self):
-            loaded = load_config(cfg_path)
-            cfg.clear()
-            cfg.update(loaded)
-            apply_config(rebuild=True)
-            self._sync_ui_from_cfg()
+            _reload_cfg_and_sync()
 
         def _preview_bg_changed(self):
             c = self.btn_preview_bg.get_rgba()
             cfg["preview_bg"] = _rgba_to_hex((c.red, c.green, c.blue, 1.0))
             self.preview.queue_draw()
             if cfg.get("auto_save", True):
-                save_config(cfg, cfg_path)
+                _save_cfg()
 
         def _restart(self):
-            """Save config, spawn a fresh daemon, then exit this one."""
-            self._read_ui_to_cfg()
-            save_config(cfg, cfg_path)
-            script = str(Path(__file__).resolve())
-            subprocess.Popen(
-                [sys.executable, script, "--daemon", "--no-ui"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            # give the new process a moment to grab the socket before we quit
-            GLib.timeout_add(300, lambda: (request_quit(), False)[1])
+            """Save config; hand off to a fresh daemon once this one exits cleanly.
 
-        def _kill_all_restart(self):
+            Uses the pipe-EOF handoff in crosshair_core -- the replacement
+            process is only spawned after this process has released the lock
+            and socket, so it never races itself for ownership (H-11).
+            """
             self._read_ui_to_cfg()
-            save_config(cfg, cfg_path)
-            script = str(Path(__file__).resolve())
-            script_name = Path(__file__).name
-            my_pid = os.getpid()
-            helper = (
-                f"import time, os, signal, subprocess, sys\n"
-                f"my_pid = {my_pid}\n"
-                f"script = {repr(script)}\n"
-                f"script_name = {repr(script_name)}\n"
-                f"deadline = time.monotonic() + 3.0\n"
-                f"while time.monotonic() < deadline:\n"
-                f"    try:\n"
-                f"        os.kill(my_pid, 0)\n"
-                f"        time.sleep(0.1)\n"
-                f"    except OSError:\n"
-                f"        break\n"
-                f"try:\n"
-                f"    r = subprocess.run(['pgrep','-f',script_name], capture_output=True, text=True)\n"
-                f"    for line in r.stdout.strip().splitlines():\n"
-                f"        try:\n"
-                f"            pid = int(line.strip())\n"
-                f"            if pid != os.getpid() and pid > 1:\n"
-                f"                os.kill(pid, signal.SIGTERM)\n"
-                f"        except Exception:\n"
-                f"            pass\n"
-                f"except Exception:\n"
-                f"    pass\n"
-                f"time.sleep(0.3)\n"
-                f"subprocess.Popen([sys.executable, script, '--daemon', '--no-ui'],\n"
-                f"    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,\n"
-                f"    start_new_session=True)\n"
-            )
-            subprocess.Popen(
-                [sys.executable, "-c", helper],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True,
+            _save_cfg()
+            _restart_guard["fd"] = core.schedule_restart(
+                Path(__file__).resolve(), ["--daemon", "--no-ui"], paths.log_file
             )
             request_quit()
 
@@ -1458,10 +1404,11 @@ def run_daemon(open_config=False):
             choices = get_monitor_choices_for_ui()
             active_label = None
             for lbl, mode, idx in choices:
-                if self._mon_choice_mode == mode:
-                    if mode != "index" or idx == self._mon_choice_index:
-                        active_label = lbl
-                        break
+                if self._mon_choice_mode == mode and (
+                    mode != "index" or idx == self._mon_choice_index
+                ):
+                    active_label = lbl
+                    break
 
             if active_label is None and self._mon_choice_mode == "index":
                 mons = [c for c in choices if c[1] == "index"]
@@ -1489,10 +1436,8 @@ def run_daemon(open_config=False):
                     try:
                         self.mon_pop.popdown()
                     except Exception:
-                        try:
+                        with contextlib.suppress(Exception):
                             self.mon_pop.hide()
-                        except Exception:
-                            pass
                     self._changed(rebuild=True)
 
                 btn.connect("clicked", _pick)
@@ -1533,7 +1478,9 @@ def run_daemon(open_config=False):
                 self.scale_shadow_op.set_value(float(s.get("opacity", 0.35)))
                 self.spin_sh_x.set_value(float(s.get("offset_x", 1)))
                 self.spin_sh_y.set_value(float(s.get("offset_y", 1)))
-                self.btn_preview_bg.set_rgba(self._gdk_rgba_from_hex(cfg.get("preview_bg", "#222222")))
+                self.btn_preview_bg.set_rgba(
+                    self._gdk_rgba_from_hex(cfg.get("preview_bg", "#222222"))
+                )
                 self._mon_choice_mode = str(cfg.get("monitor_mode", "all"))
                 self._mon_choice_index = int(cfg.get("monitor_index", 0) or 0)
                 self._mon_choice_name = str(cfg.get("monitor_name", ""))
@@ -1567,7 +1514,7 @@ def run_daemon(open_config=False):
             cfg["shadow"]["opacity"] = float(self.scale_shadow_op.get_value())
             cfg["shadow"]["offset_x"] = int(self.spin_sh_x.get_value())
             cfg["shadow"]["offset_y"] = int(self.spin_sh_y.get_value())
-            sanitize_config(cfg)
+            _sanitize_inplace(cfg)
 
         def _changed(self, rebuild=False):
             if self._suppress_changes:
@@ -1575,20 +1522,19 @@ def run_daemon(open_config=False):
             if rebuild:
                 self._pending_rebuild = True
             if self._debounce_id is not None:
-                try:
+                with contextlib.suppress(Exception):
                     GLib.source_remove(self._debounce_id)
-                except Exception:
-                    pass
                 self._debounce_id = None
 
             def do_apply():
                 self._debounce_id = None
                 do_rebuild = self._pending_rebuild
                 self._pending_rebuild = False
+                was_auto_save = bool(cfg.get("auto_save", True))
                 self._read_ui_to_cfg()
                 apply_config(rebuild=do_rebuild)
-                if cfg.get("auto_save", True):
-                    save_config(cfg, cfg_path)
+                now_auto_save = bool(cfg.get("auto_save", True))
+                _save_if_needed(was_auto_save, now_auto_save)
                 self.preview.queue_draw()
                 self._update_statusbar()
                 return False
@@ -1597,9 +1543,9 @@ def run_daemon(open_config=False):
 
         def _save(self):
             self._read_ui_to_cfg()
-            save_config(cfg, cfg_path)
+            _save_cfg()
             self._update_statusbar()
-            self._info_dialog("Saved", f"Config saved to:\n{cfg_path}")
+            self._info_dialog("Saved", f"Config saved to:\n{paths.config_file}")
 
         def _draw_preview(self, widget, cr):
             alloc = widget.get_allocation()
@@ -1615,9 +1561,16 @@ def run_daemon(open_config=False):
 
     settings_window = SettingsWindow()
 
+    if result.recovered and open_config:
+        notice = (
+            "Your Crosshair config file was invalid and has been reset to defaults.\n"
+            f"A backup of the broken file was saved to:\n{result.corrupt_copy}"
+        )
+        GLib.idle_add(lambda: (settings_window._info_dialog("Config recovered", notice), False)[-1])
+
     # apply config
     def apply_config(rebuild=False):
-        sanitize_config(cfg)
+        _sanitize_inplace(cfg)
         if rebuild:
             rebuild_windows()
         for w in windows:
@@ -1666,7 +1619,7 @@ def run_daemon(open_config=False):
                 cfg["enabled"] = not cfg.get("enabled", True)
                 apply_config()
                 if cfg.get("auto_save", True):
-                    save_config(cfg, cfg_path)
+                    _save_cfg()
                 # only sync the settings UI if the window is open -- no point
                 # updating 15 widgets on a hidden window
                 if settings_window.get_visible():
@@ -1718,7 +1671,7 @@ def run_daemon(open_config=False):
                         cfg["enabled"] = not cfg.get("enabled", True)
                         apply_config()
                         if cfg.get("auto_save", True):
-                            save_config(cfg, cfg_path)
+                            _save_cfg()
                         # sync settings window checkbox -- was missing before
                         if settings_window.get_visible():
                             settings_window._sync_ui_from_cfg()
@@ -1736,17 +1689,13 @@ def run_daemon(open_config=False):
             except Exception:
                 return None
 
-    tray = _setup_tray()
+    tray = _setup_tray()  # noqa: F841 -- keep a reference so GC doesn't drop the indicator
 
     # ipc command handling
     should_quit = {"value": False}
 
     def _do_quit():
         should_quit["value"] = True
-        try:
-            Path(PID_FILE).unlink(missing_ok=True)
-        except Exception:
-            pass
         Gtk.main_quit()
 
     _quit_callbacks.append(_do_quit)
@@ -1758,109 +1707,127 @@ def run_daemon(open_config=False):
         def _gl(fn, *args):
             GLib.idle_add(fn, *args, priority=GLib.PRIORITY_DEFAULT)
 
+        if cmd == "status":
+            return {
+                "ok": True,
+                "version": APP_VERSION,
+                "pid": os.getpid(),
+                "enabled": bool(cfg.get("enabled", True)),
+                "shape": cfg.get("shape", "dot"),
+                "color": cfg.get("color", "#a000ff"),
+                "monitor_mode": cfg.get("monitor_mode", "all"),
+                "backend": backend,
+                "layershell": use_layershell,
+                "monitors": len(get_all_monitors()),
+            }
         if cmd == "toggle":
             def _t():
                 cfg["enabled"] = not bool(cfg.get("enabled", True))
                 apply_config()
                 if cfg.get("auto_save", True):
-                    save_config(cfg, cfg_path)
+                    _save_cfg()
                 if settings_window.get_visible():
                     settings_window._sync_ui_from_cfg()
                 else:
                     settings_window._update_statusbar()
             _gl(_t)
-            return "ok"
+            return {"ok": True}
         if cmd == "show":
             def _s():
                 cfg["enabled"] = True
                 apply_config()
                 if cfg.get("auto_save", True):
-                    save_config(cfg, cfg_path)
+                    _save_cfg()
             _gl(_s)
-            return "ok"
+            return {"ok": True}
         if cmd == "hide":
             def _h():
                 cfg["enabled"] = False
                 apply_config()
                 if cfg.get("auto_save", True):
-                    save_config(cfg, cfg_path)
+                    _save_cfg()
             _gl(_h)
-            return "ok"
+            return {"ok": True}
         if cmd == "config":
             def _c():
                 settings_window.show_all()
                 settings_window.present()
             _gl(_c)
-            return "ok"
+            return {"ok": True}
         if cmd == "quit":
             _gl(request_quit)
-            return "ok"
+            return {"ok": True}
         if cmd == "reload":
-            def _r():
-                loaded = load_config(cfg_path)
-                cfg.clear()
-                cfg.update(loaded)
-                apply_config(rebuild=True)
-                settings_window._sync_ui_from_cfg()
-            _gl(_r)
-            return "ok"
+            _gl(_reload_cfg_and_sync)
+            return {"ok": True}
         if cmd == "restart":
             _gl(settings_window._restart)
-            return "ok"
-        if cmd == "set" and isinstance(payload, dict):
+            return {"ok": True}
+        if cmd == "set":
+            try:
+                patched = core.apply_patch(cfg, payload)
+            except core.ConfigError as exc:
+                return {"ok": False, "message": str(exc)}
             def _set():
-                merged = sanitize_config(deep_merge(cfg, payload))
+                was_auto_save = bool(cfg.get("auto_save", True))
                 cfg.clear()
-                cfg.update(merged)
+                cfg.update(patched)
                 apply_config(rebuild=True)
-                if cfg.get("auto_save", True):
-                    save_config(cfg, cfg_path)
+                now_auto_save = bool(cfg.get("auto_save", True))
+                _save_if_needed(was_auto_save, now_auto_save)
             _gl(_set)
-            return "ok"
-        return "unknown"
+            return {"ok": True}
+        return {"ok": False, "message": f"unknown command: {cmd}"}
 
-    # start IPC server thread
-    sock_path = DEFAULT_SOCKET
-    t = threading.Thread(target=ipc_server, args=(sock_path, handle_ipc), daemon=True)
-    t.start()
+    # server was already started (lock + socket acquired) earlier, before any
+    # window/tray construction -- now that handle_ipc exists, wire it in.
+    _ipc_handler_ref["fn"] = handle_ipc
 
-    # config file watcher
-    _cfg_mtime = [0.0]
-    try:
-        p = Path(cfg_path)
-        if p.exists():
-            _cfg_mtime[0] = p.stat().st_mtime
-    except Exception:
-        pass
-
+    # config file watcher -- fingerprint-based so our own saves never
+    # self-trigger a reload (H-02 / item 9)
     def _watch_config_file():
         try:
-            p = Path(cfg_path)
-            if not p.exists():
-                return True
-            mt = p.stat().st_mtime
-            if mt != _cfg_mtime[0]:
-                _cfg_mtime[0] = mt
-                new_cfg = load_config(cfg_path)
-                cfg.clear()
-                cfg.update(new_cfg)
-                apply_config(rebuild=True)
-                settings_window._sync_ui_from_cfg()
+            fp = core.file_fingerprint(paths.config_file)
+            if fp != _cfg_fingerprint[0]:
+                _cfg_fingerprint[0] = fp
+                _reload_cfg_and_sync()
         except Exception:
-            pass
+            log.exception("Config watcher failed")
         return True
 
     GLib.timeout_add(2000, _watch_config_file)
 
-    # monitor change detection (signal + polling fallback)
-    _last_mon_count = [len(get_all_monitors())]
+    # monitor change detection (signal + polling fallback). Fingerprints
+    # geometry/scale/primary/connector, not just count (item 12), and polls
+    # more usefully for "active" mode so it actually follows the cursor
+    # output (H-04) without needless full rebuilds.
+    def _monitor_fingerprint():
+        mons = get_all_monitors()
+        try:
+            primary = display.get_primary_monitor()
+        except Exception:
+            primary = None
+        parts = []
+        for m in mons:
+            try:
+                g = m.get_geometry()
+                parts.append((
+                    monitor_pretty_name(m), g.x, g.y, g.width, g.height,
+                    round(m.get_scale_factor() or 1), m is primary,
+                ))
+            except Exception:
+                parts.append((id(m),))
+        return tuple(parts)
+
+    _last_mon_fp = [_monitor_fingerprint()]
+    _last_active_mon = [None]
 
     def on_mon_change(*_):
         apply_config(rebuild=True)
         try:
             settings_window.refresh_monitor_options()
         except Exception:
-            pass
+            log.exception("Failed to refresh monitor options")
 
     try:
         display.connect("monitor-added", on_mon_change)
@@ -1869,171 +1836,158 @@ def run_daemon(open_config=False):
         pass
 
     def _poll_monitors():
-        n = len(get_all_monitors())
-        if n != _last_mon_count[0]:
-            _last_mon_count[0] = n
+        fp = _monitor_fingerprint()
+        if fp != _last_mon_fp[0]:
+            _last_mon_fp[0] = fp
             on_mon_change()
+            return True
+        if str(cfg.get("monitor_mode", "all")).strip().lower() == "active":
+            mons = get_monitors()
+            current = id(mons[0]) if mons else None
+            if current != _last_active_mon[0]:
+                _last_active_mon[0] = current
+                apply_config(rebuild=True)
         return True
 
-    GLib.timeout_add(3000, _poll_monitors)
+    GLib.timeout_add(400, _poll_monitors)
+
+    # graceful shutdown on SIGINT/SIGTERM (item 17). A second signal falls
+    # through to the default Python/OS handler as a force-quit escape hatch.
+    def _on_unix_signal(sig_num):
+        log.info("Received signal %s; shutting down", sig_num)
+        request_quit()
+        return GLib.SOURCE_REMOVE
+
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, _on_unix_signal, signal.SIGINT)
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, _on_unix_signal, signal.SIGTERM)
 
     if open_config:
         GLib.idle_add(lambda: (settings_window.show_all(), settings_window.present(), False)[-1])
 
-    Gtk.main()
-
-    # cleanup
     try:
-        sp = Path(sock_path)
-        if sp.exists():
-            sp.unlink()
-    except Exception:
-        pass
-    try:
-        Path(PID_FILE).unlink(missing_ok=True)
-    except Exception:
-        pass
+        Gtk.main()
+    finally:
+        server.stop()
+        core.release_restart_guard(_restart_guard["fd"])
+        log.info("Stopped %s (pid %s)", APP_NAME, os.getpid())
 
     return 0
 
-# --- misc
-
-def start_daemon_background():
-    try:
-        subprocess.Popen(
-            [sys.executable, str(Path(__file__).resolve()), "--daemon", "--no-ui"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        return True
-    except Exception:
-        return False
-
-def doctor():
-    print(f"{APP_NAME} v{APP_VERSION} doctor")
-    print(f"Session type: {os.environ.get('XDG_SESSION_TYPE', '(unknown)')}")
-    print(f"Config:  {DEFAULT_CONFIG}")
-    print(f"Socket:  {DEFAULT_SOCKET}")
-    print(f"PID:     {PID_FILE}")
-    import importlib
-    for label, gi_ns, ver, pkg in [
-        ("GTK3",          "Gtk",          "3.0", "python3-gobject + gtk3"),
-        ("GtkLayerShell", "GtkLayerShell","0.1", "gtk-layer-shell"),
-        ("AppIndicator3", "AppIndicator3","0.1", "libappindicator3-1"),
-        ("pycairo",       None,           None,  "python3-cairo / python3-gi-cairo"),
-    ]:
-        try:
-            if gi_ns is None:
-                importlib.import_module("cairo")
-            else:
-                import gi
-                gi.require_version(gi_ns, ver)
-                importlib.import_module(f"gi.repository.{gi_ns}")
-            print(f"  {label}: OK")
-        except Exception as e:
-            print(f"  {label}: MISSING -- {pkg}")
-            print(f"    {e}")
-    pid = read_pid_file()
-    if pid:
-        alive = pid_is_alive(pid)
-        print(f"Daemon PID {pid}: {'running' if alive else 'stale (not running)'}")
-    else:
-        print("No PID file found -- daemon not running.")
-    return 0
-
-# --- CLI
+# --- CLI --------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(prog=APP_ID, add_help=True,
                                      description=f"{APP_NAME} v{APP_VERSION} -- crosshair overlay")
-    parser.add_argument("--daemon",           action="store_true", help="Run overlay daemon")
-    parser.add_argument("--config",           action="store_true", help="Open config UI (talks to daemon)")
-    parser.add_argument("--toggle",           action="store_true", help="Toggle enabled")
-    parser.add_argument("--show",             action="store_true", help="Enable/show")
-    parser.add_argument("--hide",             action="store_true", help="Disable/hide")
-    parser.add_argument("--quit",             action="store_true", help="Quit daemon")
-    parser.add_argument("--restart",          action="store_true", help="Restart daemon")
-    parser.add_argument("--reload",           action="store_true", help="Reload config from disk")
-    parser.add_argument("--status",           action="store_true", help="Print daemon status and config summary")
-    parser.add_argument("--set",              type=str,            help="Set config keys via JSON")
-    parser.add_argument("--install",          action="store_true", help="Install into ~/.local/bin")
-    parser.add_argument("--autostart",        action="store_true", help="Install + set up autostart")
+    parser.add_argument("--daemon", action="store_true", help="Run overlay daemon")
+    parser.add_argument("--config", action="store_true", help="Open config UI (talks to daemon)")
+    parser.add_argument("--toggle", action="store_true", help="Toggle enabled")
+    parser.add_argument("--show", action="store_true", help="Enable/show")
+    parser.add_argument("--hide", action="store_true", help="Disable/hide")
+    parser.add_argument("--quit", action="store_true", help="Quit daemon (idempotent)")
+    parser.add_argument("--restart", action="store_true", help="Restart daemon")
+    parser.add_argument("--reload", action="store_true", help="Reload config from disk")
+    parser.add_argument("--status", action="store_true", help="Print live daemon status")
+    parser.add_argument("--set", type=str, help="Set config keys via JSON")
+    parser.add_argument("--install", action="store_true",
+                        help="Install into ~/.local/bin + app menu")
+    parser.add_argument("--autostart", action="store_true",
+                        help="Install + enable XDG autostart")
     parser.add_argument("--desktop-shortcut", action="store_true",
-                        help="Create a double-clickable .desktop icon on ~/Desktop")
-    parser.add_argument("--no-ui",            action="store_true", help="Daemon: do not open config UI on start")
-    parser.add_argument("--doctor",           action="store_true", help="Print dependency diagnostics")
-    parser.add_argument("--kill-all",         action="store_true",
-                        help="Kill ALL running instances of this script (nuclear option)")
+                        help="Create a double-clickable .desktop icon on the Desktop")
+    parser.add_argument("--no-ui", action="store_true",
+                        help="Daemon: do not open config UI on start")
+    parser.add_argument("--doctor", action="store_true",
+                        help="Print dependency/backend diagnostics")
+    parser.add_argument("--uninstall", action="store_true",
+                        help="Remove installed app/autostart (keeps config)")
+    parser.add_argument("--purge-config", action="store_true",
+                        help="Explicitly remove retained user config")
+    parser.add_argument("--verbose", action="store_true", help="Verbose daemon logging")
     args = parser.parse_args()
 
+    paths = core.AppPaths.from_env()
+
     if args.doctor:
-        return doctor()
+        return doctor(paths)
 
     if args.status:
-        pid = read_pid_file()
-        alive = bool(pid and pid_is_alive(pid))
-        print(f"daemon: {'running (pid ' + str(pid) + ')' if alive else 'not running'}")
-        cfg = load_config()
-        print(f"config:  {DEFAULT_CONFIG}")
-        print(f"enabled: {cfg.get('enabled', True)}")
-        print(f"shape:   {cfg.get('shape', 'dot')}")
-        print(f"color:   {cfg.get('color', '#a000ff')}")
-        print(f"monitor: {cfg.get('monitor_mode', 'all')}")
-        return 0
-
-    if args.kill_all:
-        n = kill_all_python_crosshair()
-        kill_existing_daemon()
-        print(f"Killed {n} instance(s).")
+        try:
+            response = core.ipc_call(paths, {"cmd": "status"})
+            print(f"daemon:  running (pid {response.get('pid', '?')})")
+            print(f"config:  {paths.config_file}")
+            print(f"enabled: {response.get('enabled')}")
+            print(f"shape:   {response.get('shape')}")
+            print(f"color:   {response.get('color')}")
+            print(f"monitor: {response.get('monitor_mode')}")
+            print(f"backend: {response.get('backend')} (layershell={response.get('layershell')})")
+        except core.IpcUnavailable:
+            print("daemon:  not running")
+            result = core.load_config(paths.config_file)
+            print(f"config (on disk): {paths.config_file}")
+            print(f"enabled: {result.config.get('enabled', True)}")
+            print(f"shape:   {result.config.get('shape', 'dot')}")
+            print(f"color:   {result.config.get('color', '#a000ff')}")
+            print(f"monitor: {result.config.get('monitor_mode', 'all')}")
+            if result.recovered:
+                print(f"NOTE: on-disk config was invalid; defaults shown ({result.error})")
         return 0
 
     if args.install:
-        py_path, bin_path = install_self()
+        try:
+            py_path, bin_path = install_self(paths)
+        except core.CoreError as exc:
+            print(f"Install failed: {exc}", file=sys.stderr)
+            return 1
         print(f"Script:  {py_path}")
         print(f"Command: {bin_path}")
+        print(f"Menu:    {paths.application_entry}")
         return 0
 
     if args.autostart:
-        unit_path, desktop_path, sysd_ok, bin_path = install_autostart()
-        print(f"Command:  {bin_path}")
-        print(f"Systemd:  {unit_path}")
-        print(f"Desktop:  {desktop_path}")
-        print("Autostart:", "enabled (systemd user)" if sysd_ok else "fallback (.desktop)")
+        try:
+            bin_path, autostart_path = install_autostart(paths)
+        except core.CoreError as exc:
+            print(f"Autostart install failed: {exc}", file=sys.stderr)
+            return 1
+        print(f"Command:   {bin_path}")
+        print(f"Autostart: {autostart_path}")
         return 0
 
     if args.desktop_shortcut:
-        path = install_desktop_shortcut()
+        try:
+            path = install_desktop_shortcut(paths)
+        except core.CoreError as exc:
+            print(f"Desktop shortcut failed: {exc}", file=sys.stderr)
+            return 1
         print(f"Desktop shortcut created: {path}")
         print("Double-click it in your file manager to launch.")
         print("Do NOT run it from terminal -- it is a launcher, not a shell script.")
         return 0
 
-    if args.daemon:
-        return run_daemon(open_config=(not args.no_ui))
+    did_something = False
+    if args.uninstall:
+        removed = uninstall_app(paths)
+        print("Removed:" if removed else "Nothing installed to remove.")
+        for r in removed:
+            print(f"  {r}")
+        did_something = True
+    if args.purge_config:
+        removed = purge_config(paths)
+        print("Config purged:" if removed else "No config to purge.")
+        for r in removed:
+            print(f"  {r}")
+        did_something = True
+    if did_something:
+        return 0
 
-    def _send_or_start(cmd, payload=None, need_daemon=True):
-        ok, _resp = ipc_send(cmd, payload=payload)
-        if ok:
-            return True
-        if cmd == "quit":
-            print("Daemon not running.")
-            return False
-        if not need_daemon:
-            return False
-        started = start_daemon_background()
-        if not started:
-            return False
-        for _ in range(80):
-            time.sleep(0.05)
-            ok, _resp = ipc_send(cmd, payload=payload)
-            if ok:
-                return True
-        return False
+    if args.daemon:
+        return run_daemon(paths, open_config=(not args.no_ui), verbose=args.verbose)
 
     if args.restart:
-        ok, _ = ipc_send("restart")
-        if not ok:
-            start_daemon_background()
+        try:
+            core.ipc_call(paths, {"cmd": "restart"})
+        except core.IpcUnavailable:
+            start_daemon_background(paths)
         return 0
 
     explicit = (args.toggle or args.show or args.hide or args.config or
@@ -2042,33 +1996,68 @@ def main():
     if explicit:
         cmd = None
         payload = None
-        if args.toggle:       cmd = "toggle"
-        elif args.show:       cmd = "show"
-        elif args.hide:       cmd = "hide"
-        elif args.config:     cmd = "config"
-        elif args.quit:       cmd = "quit"
-        elif args.reload:     cmd = "reload"
+        if args.toggle:
+            cmd = "toggle"
+        elif args.show:
+            cmd = "show"
+        elif args.hide:
+            cmd = "hide"
+        elif args.config:
+            cmd = "config"
+        elif args.quit:
+            cmd = "quit"
+        elif args.reload:
+            cmd = "reload"
         elif args.set is not None:
             cmd = "set"
             try:
                 payload = json.loads(args.set)
                 if not isinstance(payload, dict):
                     raise ValueError("JSON must be an object")
-            except Exception as e:
+            except (json.JSONDecodeError, ValueError) as exc:
                 print('--set expects a JSON object, e.g. --set \'{"enabled": false}\'',
                       file=sys.stderr)
-                print(str(e), file=sys.stderr)
+                print(str(exc), file=sys.stderr)
                 return 2
 
-        if _send_or_start(cmd, payload=payload):
-            return 0
-        print("Could not contact daemon.", file=sys.stderr)
-        return 2
+        request = {"cmd": cmd}
+        if payload is not None:
+            request["payload"] = payload
+
+        response = None
+        try:
+            response = core.ipc_call(paths, request)
+        except core.IpcUnavailable:
+            if cmd == "quit":
+                print("Daemon not running.")
+                return 0
+            if not start_daemon_background(paths):
+                print("Could not start daemon.", file=sys.stderr)
+                return 2
+            for _ in range(80):
+                time.sleep(0.05)
+                try:
+                    response = core.ipc_call(paths, request)
+                    break
+                except core.IpcUnavailable:
+                    continue
+
+        if response is None:
+            print("Could not contact daemon.", file=sys.stderr)
+            return 2
+        if not response.get("ok", False):
+            print(f"Command failed: {response.get('message', 'unknown error')}", file=sys.stderr)
+            return 2
+        return 0
 
     # no args: start daemon, or bring up config if already running
-    if _send_or_start("config"):
-        return 0
-    return run_daemon(open_config=True)
+    try:
+        response = core.ipc_call(paths, {"cmd": "config"})
+        if response.get("ok", False):
+            return 0
+    except core.IpcUnavailable:
+        pass
+    return run_daemon(paths, open_config=True, verbose=args.verbose)
 
 
 if __name__ == "__main__":
