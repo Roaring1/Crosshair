@@ -179,7 +179,7 @@ HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 ALLOWED_TOP = {
     "enabled", "shape", "opacity", "size", "thickness", "gap", "color",
     "outline", "shadow", "monitor_mode", "monitor_index", "monitor_name",
-    "preview_bg", "auto_save",
+    "monitor_name_ordinal", "preview_bg", "auto_save",
 }
 ALLOWED_OUTLINE = {"enabled", "color", "opacity", "thickness"}
 ALLOWED_SHADOW = {"enabled", "color", "opacity", "offset_x", "offset_y"}
@@ -209,6 +209,7 @@ def default_config() -> JsonObject:
         "monitor_mode": "all",
         "monitor_index": 0,
         "monitor_name": "",
+        "monitor_name_ordinal": 0,
         "preview_bg": "#222222",
         "auto_save": True,
     }
@@ -309,6 +310,7 @@ def sanitize_config(raw: Any, *, strict_unknown: bool = False) -> JsonObject:
         "monitor_mode": monitor_mode,
         "monitor_index": as_int(raw.get("monitor_index"), 0, 0, 255),
         "monitor_name": monitor_name[:MAX_STRING_LENGTH],
+        "monitor_name_ordinal": as_int(raw.get("monitor_name_ordinal"), 0, 0, 255),
         "preview_bg": as_color(raw.get("preview_bg"), "#222222"),
         "auto_save": as_bool(raw.get("auto_save"), True),
     }
@@ -605,6 +607,7 @@ def validate_patch(payload: Any) -> JsonObject:
         "thickness": (1, 100),
         "gap": (0, 200),
         "monitor_index": (0, 255),
+        "monitor_name_ordinal": (0, 255),
     }
     for key, value in result.items():
         if key in {"outline", "shadow"}:

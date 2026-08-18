@@ -801,16 +801,58 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
                 mons.append(display.get_monitor(i))
         return mons
 
+    def _monitor_geo_key(m):
+        # Stable left-to-right, top-to-bottom ordering for numbering monitors
+        # in the UI and for disambiguating duplicate model names below.
+        try:
+            g = m.get_geometry()
+            return (g.x, g.y)
+        except Exception:
+            return (0, 0)
+
+    def _resolve_by_name(mons, needle, ordinal):
+        # Resolve a saved (name, ordinal) pair back to a live monitor object.
+        # Exact case-insensitive match first; falls back to substring match
+        # for configs saved before this was tightened. When multiple
+        # monitors share an identical name (e.g. two of the same model),
+        # `ordinal` picks the Nth one in stable left-to-right order -- this
+        # is what makes "monitor 3" keep meaning the same physical screen
+        # even if the OS re-enumerates monitors after a hotplug/reconnect.
+        needle = str(needle or "").strip()
+        if not needle:
+            return None
+        low = needle.lower()
+        exact = [m for m in mons if monitor_pretty_name(m).strip().lower() == low]
+        candidates = exact if exact else [
+            m for m in mons if low in monitor_pretty_name(m).lower()
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=_monitor_geo_key)
+        idx = _clamp(int(ordinal or 0), 0, len(candidates) - 1)
+        return candidates[idx]
+
     def get_monitor_choices_for_ui():
-        # "active" follows the cursor -- useful when swapping between displays
+        # "active" follows the cursor -- useful when swapping between displays.
+        # Specific-monitor picks are identified by NAME (+ ordinal for
+        # duplicate model names), not raw enumeration index -- index order
+        # can reshuffle on hotplug/wake, silently pointing "monitor 3" at a
+        # different physical screen. Name (+ordinal) survives reconnects.
         choices = [
             ("all",                  "all",    None),
             ("primary",              "primary", None),
             ("active (cursor mon.)", "active",  None),
         ]
-        mons = get_all_monitors()
-        for i, mon in enumerate(mons):
-            choices.append((f"monitor {i+1} [{monitor_pretty_name(mon)}]", "index", i))
+        mons = sorted(get_all_monitors(), key=_monitor_geo_key)
+        seen = {}
+        for pos, mon in enumerate(mons):
+            name = monitor_pretty_name(mon)
+            ordinal = seen.get(name, 0)
+            seen[name] = ordinal + 1
+            label = f"{pos + 1}: {name}"
+            if ordinal > 0:
+                label += f" (dup #{ordinal + 1})"
+            choices.append((label, "name", (name, ordinal)))
         return choices
 
     def _fallback_primary(mons):
@@ -834,11 +876,11 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
             cfg["monitor_index"] = idx
             return [mons[idx]]
         if mm == "name":
-            needle = str(cfg.get("monitor_name", "")).strip().lower()
-            if needle:
-                for mon in mons:
-                    if needle in monitor_pretty_name(mon).lower():
-                        return [mon]
+            picked = _resolve_by_name(
+                mons, cfg.get("monitor_name", ""), cfg.get("monitor_name_ordinal", 0)
+            )
+            if picked is not None:
+                return [picked]
             return _fallback_primary(mons)
         if mm == "active":
             try:
@@ -989,6 +1031,7 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
             self._mon_choice_mode = str(cfg.get("monitor_mode", "all")).strip().lower()
             self._mon_choice_index = int(cfg.get("monitor_index", 0) or 0)
             self._mon_choice_name = str(cfg.get("monitor_name", ""))
+            self._mon_choice_name_ordinal = int(cfg.get("monitor_name_ordinal", 0) or 0)
 
             self.mon_btn = Gtk.MenuButton()
             self.mon_btn.set_size_request(320, -1)
@@ -1403,35 +1446,39 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
 
             choices = get_monitor_choices_for_ui()
             active_label = None
-            for lbl, mode, idx in choices:
-                if self._mon_choice_mode == mode and (
-                    mode != "index" or idx == self._mon_choice_index
-                ):
+            for lbl, mode, extra in choices:
+                if self._mon_choice_mode != mode:
+                    continue
+                if mode == "name" and extra is not None:
+                    name, ordinal = extra
+                    if name == self._mon_choice_name and ordinal == self._mon_choice_name_ordinal:
+                        active_label = lbl
+                        break
+                else:
                     active_label = lbl
                     break
 
-            if active_label is None and self._mon_choice_mode == "index":
-                mons = [c for c in choices if c[1] == "index"]
-                if mons:
-                    self._mon_choice_index = _clamp(self._mon_choice_index, 0, len(mons) - 1)
-                    active_label = mons[self._mon_choice_index][0]
-
             if active_label is None:
+                # Nothing matched -- likely a pre-upgrade config that used a
+                # raw index, or the previously-chosen screen is unplugged.
+                # Fall back to "all" rather than guessing at a possibly
+                # wrong physical monitor.
                 self._mon_choice_mode = "all"
-                self._mon_choice_index = 0
+                self._mon_choice_name = ""
+                self._mon_choice_name_ordinal = 0
                 active_label = "all"
 
             self.mon_btn_label.set_text(active_label)
 
-            def add_item(lbl, mode, idx):
+            def add_item(lbl, mode, extra):
                 btn = Gtk.ModelButton(label=lbl)
                 btn.set_hexpand(True)
                 btn.set_halign(Gtk.Align.FILL)
 
                 def _pick(*_):
                     self._mon_choice_mode = mode
-                    if mode == "index" and idx is not None:
-                        self._mon_choice_index = int(idx)
+                    if mode == "name" and extra is not None:
+                        self._mon_choice_name, self._mon_choice_name_ordinal = extra
                     self.mon_btn_label.set_text(lbl)
                     try:
                         self.mon_pop.popdown()
@@ -1443,11 +1490,10 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
                 btn.connect("clicked", _pick)
                 self.mon_pop_box.pack_start(btn, False, False, 0)
 
-            for lbl, mode, idx in choices:
-                add_item(lbl, mode, idx)
+            for lbl, mode, extra in choices:
+                add_item(lbl, mode, extra)
 
             self.mon_pop_box.show_all()
-            self.mon_pop.show_all()
 
         def refresh_monitor_options(self):
             self._refresh_monitor_dropdown()
@@ -1484,6 +1530,7 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
                 self._mon_choice_mode = str(cfg.get("monitor_mode", "all"))
                 self._mon_choice_index = int(cfg.get("monitor_index", 0) or 0)
                 self._mon_choice_name = str(cfg.get("monitor_name", ""))
+                self._mon_choice_name_ordinal = int(cfg.get("monitor_name_ordinal", 0) or 0)
                 self._refresh_monitor_dropdown()
             finally:
                 self._suppress_changes = False
@@ -1575,8 +1622,137 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
             rebuild_windows()
         for w in windows:
             w.apply_config()
+        sync_fn = _tray_sync_ref["fn"]
+        if sync_fn is not None:
+            with contextlib.suppress(Exception):
+                sync_fn()
 
-    # tray
+    # tray -- one shared menu builder used by both AppIndicator3 and the
+    # Gtk.StatusIcon fallback, rebuilt fresh from cfg on every state change
+    # (see the sync_fn call in apply_config above) rather than mutated in
+    # place. That keeps the "Screen" list and ON/OFF indicator honest no
+    # matter whether the change came from the tray itself, the Settings
+    # window, a CLI --set/--toggle call, or a monitor hotplug event.
+    _tray_sync_ref = {"fn": None}
+
+    def _current_monitor_selection_matches(mode, extra):
+        if str(cfg.get("monitor_mode", "all")) != mode:
+            return False
+        if mode == "name" and extra is not None:
+            name, ordinal = extra
+            return (str(cfg.get("monitor_name", "")) == name and
+                    int(cfg.get("monitor_name_ordinal", 0) or 0) == ordinal)
+        return True
+
+    def _apply_monitor_choice(mode, extra):
+        cfg["monitor_mode"] = mode
+        if mode == "name" and extra is not None:
+            name, ordinal = extra
+            cfg["monitor_name"] = name
+            cfg["monitor_name_ordinal"] = ordinal
+        apply_config(rebuild=True)
+        if cfg.get("auto_save", True):
+            _save_cfg()
+        if settings_window.get_visible():
+            settings_window._sync_ui_from_cfg()
+        else:
+            settings_window._update_statusbar()
+
+    def _build_tray_menu():
+        menu = Gtk.Menu()
+        enabled = bool(cfg.get("enabled", True))
+
+        status_item = Gtk.MenuItem(label=f"\u25cf Crosshair: {'ON' if enabled else 'OFF'}")
+        status_item.set_sensitive(False)
+        menu.append(status_item)
+        menu.append(Gtk.SeparatorMenuItem())
+
+        screen_item = Gtk.MenuItem(label="Screen")
+        screen_menu = Gtk.Menu()
+        radio_items = []
+        for lbl, mode, extra in get_monitor_choices_for_ui():
+            mi = Gtk.RadioMenuItem(label=lbl)
+            if radio_items:
+                mi.join_group(radio_items[0])
+            radio_items.append(mi)
+            # set_active BEFORE connecting -- avoids a spurious "toggled"
+            # firing from this programmatic init and re-triggering a rebuild
+            mi.set_active(_current_monitor_selection_matches(mode, extra))
+
+            def _mk(mode=mode, extra=extra):
+                def _cb(item):
+                    if item.get_active():
+                        _apply_monitor_choice(mode, extra)
+                return _cb
+
+            mi.connect("toggled", _mk())
+            screen_menu.append(mi)
+        screen_menu.show_all()
+        screen_item.set_submenu(screen_menu)
+        menu.append(screen_item)
+        menu.append(Gtk.SeparatorMenuItem())
+
+        def _open_settings():
+            settings_window.show_all()
+            settings_window.present()
+            return False
+
+        settings_item = Gtk.MenuItem(label=f"{APP_NAME} Settings")
+        settings_item.connect("activate", lambda *_: GLib.idle_add(_open_settings))
+        menu.append(settings_item)
+
+        toggle_item = Gtk.CheckMenuItem(label="Enabled")
+        toggle_item.set_active(enabled)
+
+        def _toggle_cb(item):
+            new_val = bool(item.get_active())
+            if new_val == bool(cfg.get("enabled", True)):
+                return
+            cfg["enabled"] = new_val
+            apply_config()
+            if cfg.get("auto_save", True):
+                _save_cfg()
+            if settings_window.get_visible():
+                settings_window._sync_ui_from_cfg()
+            else:
+                settings_window._update_statusbar()
+
+        toggle_item.connect("toggled", _toggle_cb)
+        menu.append(toggle_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+        restart_item = Gtk.MenuItem(label="\u21ba Restart")
+        restart_item.connect("activate", lambda *_: settings_window._restart())
+        menu.append(restart_item)
+        quit_item = Gtk.MenuItem(label="\u2715 Quit")
+        quit_item.connect("activate", lambda *_: request_quit())
+        menu.append(quit_item)
+
+        menu.show_all()
+        return menu
+
+    _tray_state = {"indicator": None, "status_icon": None}
+
+    def _sync_tray():
+        enabled = bool(cfg.get("enabled", True))
+        state_text = "ON" if enabled else "OFF"
+        indicator = _tray_state.get("indicator")
+        if indicator is not None:
+            with contextlib.suppress(Exception):
+                indicator.set_menu(_build_tray_menu())
+            # set_label puts short text next to the tray icon on DEs that
+            # support it (Unity/some Plasma configs) -- an at-a-glance
+            # ON/OFF without opening the menu at all. Harmless no-op
+            # elsewhere. set_title shows up in some Plasma hover tooltips.
+            with contextlib.suppress(Exception):
+                indicator.set_label(state_text, "OFF")
+            with contextlib.suppress(Exception):
+                indicator.set_title(f"{APP_NAME} \u2014 {state_text}")
+        icon = _tray_state.get("status_icon")
+        if icon is not None:
+            with contextlib.suppress(Exception):
+                icon.set_tooltip_text(f"{APP_NAME} \u2014 {state_text}")
+
     def _setup_tray():
         if HAVE_APPINDICATOR:
             indicator = AppIndicator3.Indicator.new(
@@ -1599,40 +1775,9 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
                     pass
 
             indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
-            menu = Gtk.Menu()
-
-            def _mi(label, fn):
-                item = Gtk.MenuItem(label=label)
-                item.connect("activate", lambda *_: fn())
-                menu.append(item)
-                return item
-
-            def _open_settings():
-                settings_window.show_all()
-                settings_window.present()
-                return False
-
-            _mi(f"{APP_NAME} Settings",
-                lambda: GLib.idle_add(_open_settings))
-
-            def _tray_toggle():
-                cfg["enabled"] = not cfg.get("enabled", True)
-                apply_config()
-                if cfg.get("auto_save", True):
-                    _save_cfg()
-                # only sync the settings UI if the window is open -- no point
-                # updating 15 widgets on a hidden window
-                if settings_window.get_visible():
-                    settings_window._sync_ui_from_cfg()
-                else:
-                    settings_window._update_statusbar()
-
-            _mi("Toggle", _tray_toggle)
-            menu.append(Gtk.SeparatorMenuItem())
-            _mi("Restart", lambda: settings_window._restart())
-            _mi("Quit", request_quit)
-            menu.show_all()
-            indicator.set_menu(menu)
+            _tray_state["indicator"] = indicator
+            _tray_sync_ref["fn"] = _sync_tray
+            _sync_tray()
             return indicator
 
         else:
@@ -1640,51 +1785,22 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
             try:
                 icon = Gtk.StatusIcon()
                 icon.set_from_icon_name("input-mouse")
-                icon.set_tooltip_text(APP_NAME)
+
                 def _open_settings():
                     settings_window.show_all()
                     settings_window.present()
                     return False
 
-                icon.connect("activate",
-                             lambda *_: GLib.idle_add(_open_settings))
-                icon.connect("popup-menu", lambda icon, btn, t: _tray_popup(icon, btn, t))
-                icon.set_visible(True)
+                icon.connect("activate", lambda *_: GLib.idle_add(_open_settings))
 
                 def _tray_popup(icon, btn, t):
-                    menu = Gtk.Menu()
+                    _build_tray_menu().popup(None, None, None, None, btn, t)
 
-                    def _mi(label, fn):
-                        item = Gtk.MenuItem(label=label)
-                        item.connect("activate", lambda *_: fn())
-                        menu.append(item)
-
-                    def _open_settings():
-                        settings_window.show_all()
-                        settings_window.present()
-                        return False
-
-                    _mi("Settings",
-                        lambda: GLib.idle_add(_open_settings))
-
-                    def _tray_toggle():
-                        cfg["enabled"] = not cfg.get("enabled", True)
-                        apply_config()
-                        if cfg.get("auto_save", True):
-                            _save_cfg()
-                        # sync settings window checkbox -- was missing before
-                        if settings_window.get_visible():
-                            settings_window._sync_ui_from_cfg()
-                        else:
-                            settings_window._update_statusbar()
-
-                    _mi("Toggle", _tray_toggle)
-                    menu.append(Gtk.SeparatorMenuItem())
-                    _mi("Restart", lambda: settings_window._restart())
-                    _mi("Quit", request_quit)
-                    menu.show_all()
-                    menu.popup(None, None, None, None, btn, t)
-
+                icon.connect("popup-menu", _tray_popup)
+                icon.set_visible(True)
+                _tray_state["status_icon"] = icon
+                _tray_sync_ref["fn"] = _sync_tray
+                _sync_tray()
                 return icon
             except Exception:
                 return None
