@@ -765,10 +765,30 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
 
     _mon_name_cache = {}
 
+    def _mon_cache_key(mon):
+        # Stable hardware identity (physical size in mm) instead of the
+        # GObject wrapper's id() -- id() changes on every hotplug/reconnect
+        # even for the same physical screen, which meant a fresh (and on
+        # this box, apparently multi-second/EDID-reading) manufacturer/model
+        # lookup on every single reconnect -- e.g. every time a Moonlight/
+        # Sunshine virtual display toggled during a stream, blocking the GTK
+        # main loop each time. Physical size in mm comes from the same
+        # wl_output geometry event GDK already has in hand, so reading it
+        # here doesn't trigger a fresh blocking driver round-trip.
+        try:
+            w_mm = int(mon.get_width_mm() or 0)
+            h_mm = int(mon.get_height_mm() or 0)
+        except Exception:
+            w_mm = h_mm = 0
+        if w_mm or h_mm:
+            return ("phys", w_mm, h_mm)
+        return ("id", id(mon))
+
     def monitor_pretty_name(mon):
-        # Cache by object identity -- EDID reads (manufacturer/model) can block
-        # for several seconds on some drivers. get_connector() is always instant.
-        key = id(mon)
+        # Cache by stable hardware identity -- EDID reads (manufacturer/model)
+        # can block for several seconds on some drivers. get_connector() is
+        # always instant.
+        key = _mon_cache_key(mon)
         if key in _mon_name_cache:
             return _mon_name_cache[key]
         name = ""
@@ -1625,7 +1645,7 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
         sync_fn = _tray_sync_ref["fn"]
         if sync_fn is not None:
             with contextlib.suppress(Exception):
-                sync_fn()
+                sync_fn(rebuild)
 
     # tray -- one shared menu builder used by both AppIndicator3 and the
     # Gtk.StatusIcon fallback, rebuilt fresh from cfg on every state change
@@ -1665,6 +1685,7 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
         status_item = Gtk.MenuItem(label=f"\u25cf Crosshair: {'ON' if enabled else 'OFF'}")
         status_item.set_sensitive(False)
         menu.append(status_item)
+        _tray_state["status_item"] = status_item
         menu.append(Gtk.SeparatorMenuItem())
 
         screen_item = Gtk.MenuItem(label="Screen")
@@ -1703,6 +1724,7 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
 
         toggle_item = Gtk.CheckMenuItem(label="Enabled")
         toggle_item.set_active(enabled)
+        _tray_state["toggle_item"] = toggle_item
 
         def _toggle_cb(item):
             new_val = bool(item.get_active())
@@ -1731,15 +1753,36 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
         menu.show_all()
         return menu
 
-    _tray_state = {"indicator": None, "status_icon": None}
+    _tray_state = {"indicator": None, "status_icon": None, "menu": None,
+                   "status_item": None, "toggle_item": None}
 
-    def _sync_tray():
+    def _refresh_tray_menu_state(enabled):
+        # Cheap path for a plain enabled/disabled flip: update the two
+        # widgets in place instead of re-walking every monitor and rebuilding
+        # the whole menu (get_monitor_choices_for_ui() -> monitor_pretty_name()
+        # can block on some drivers -- see _mon_cache_key above -- so this
+        # matters for how responsive toggling feels, not just efficiency).
+        status_item = _tray_state.get("status_item")
+        if status_item is not None:
+            with contextlib.suppress(Exception):
+                status_item.set_label(f"\u25cf Crosshair: {'ON' if enabled else 'OFF'}")
+        toggle_item = _tray_state.get("toggle_item")
+        if toggle_item is not None and bool(toggle_item.get_active()) != enabled:
+            with contextlib.suppress(Exception):
+                toggle_item.set_active(enabled)
+
+    def _sync_tray(rebuild=True):
         enabled = bool(cfg.get("enabled", True))
         state_text = "ON" if enabled else "OFF"
         indicator = _tray_state.get("indicator")
         if indicator is not None:
-            with contextlib.suppress(Exception):
-                indicator.set_menu(_build_tray_menu())
+            if rebuild or _tray_state.get("menu") is None:
+                menu = _build_tray_menu()
+                _tray_state["menu"] = menu
+                with contextlib.suppress(Exception):
+                    indicator.set_menu(menu)
+            else:
+                _refresh_tray_menu_state(enabled)
             # set_label puts short text next to the tray icon on DEs that
             # support it (Unity/some Plasma configs) -- an at-a-glance
             # ON/OFF without opening the menu at all. Harmless no-op
