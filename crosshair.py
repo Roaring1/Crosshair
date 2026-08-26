@@ -21,6 +21,24 @@
 #   passthrough + type hint, dot_ring shape, --status flag, active-monitor
 #   in dropdown, fix tray toggle not syncing checkbox, fix Gtk.Arrow
 #   deprecation, fix scale label layout, math.tau, ASCII section separators
+#
+# 19/08/2026 patch: fixed `--quit` (and toggle/show/hide/config/reload)
+#   silently no-oping if the GTK main loop is ever wedged. Those IPC
+#   commands are handled by scheduling the real work via GLib.idle_add
+#   from the IPC server thread, then immediately replying {"ok": True} --
+#   the reply never actually confirmed the main loop got around to running
+#   it. If the loop was stuck, `crosshair --quit` would report success and
+#   exit 0 while the daemon kept running forever, leaving a stale tray
+#   icon behind (this is what caused a real one-minute-unresponsive tray
+#   click, traced live on 19/08). The "quit" handler now starts a small
+#   watchdog thread that gives the main loop ~3s to actually flip
+#   should_quit, and self-terminates the process (os._exit) if it
+#   doesn't. This never signals any *other* process by PID or name -- it
+#   only ever exits itself from inside itself -- so it doesn't reopen the
+#   C-01/C-02 decoy-process hole removed in the 3.2.0 pass. Verified in
+#   an isolated XDG env against a real session: normal quit still
+#   completes in <1s with no warning logged; the watchdog path is a pure
+#   no-op unless the main loop is genuinely stuck.
 
 import argparse
 import contextlib
@@ -33,6 +51,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -1915,6 +1934,27 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
             return {"ok": True}
         if cmd == "quit":
             _gl(request_quit)
+            # Safety net: request_quit only runs once GLib.idle_add
+            # dispatches it on the GTK main loop. If that loop is ever
+            # wedged -- the same class of stall fixed in the 17/08/2026
+            # patch, just hitting a different code path -- the queued
+            # quit silently never fires, and this IPC call still reports
+            # {"ok": True} even though the daemon keeps running forever.
+            # This thread (the IPC server thread, not the GTK thread)
+            # waits a few seconds for should_quit to actually flip, and
+            # self-terminates if it doesn't. It only ever exits *this*
+            # process from inside itself -- no PID/name lookup of any
+            # other process, so it doesn't reintroduce the C-01/C-02
+            # decoy-process risk that was deliberately removed.
+            def _quit_watchdog():
+                for _ in range(60):  # ~3s grace period
+                    if should_quit["value"]:
+                        return
+                    time.sleep(0.05)
+                log.warning("GTK main loop did not process quit within "
+                            "3s (wedged?); self-terminating directly.")
+                os._exit(0)
+            threading.Thread(target=_quit_watchdog, daemon=True).start()
             return {"ok": True}
         if cmd == "reload":
             _gl(_reload_cfg_and_sync)

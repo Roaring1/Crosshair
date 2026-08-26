@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — 19/08/2026
+
+- **Fixed:** `--quit` (and `--toggle`/`--show`/`--hide`/`--config`/`--reload`)
+  could report success while the daemon kept running, if the GTK main loop
+  was ever wedged. These commands ran via `GLib.idle_add` from the IPC
+  thread, which replied `{"ok": true}` before confirming the main loop
+  actually processed it. Root-caused live: a stale tray registration from
+  an old daemon caused the exact one-minute-unresponsive-click symptom
+  the 17/08 stall fix targeted, and `--quit` against that stuck daemon
+  silently did nothing. `quit` now runs a bounded (~3s) watchdog thread
+  that self-terminates the process directly if the main loop doesn't
+  confirm shutdown in time. Only ever exits itself, from itself -- no
+  PID/name targeting of any other process, so it doesn't reopen the
+  C-01/C-02 decoy-process hole. Verified in an isolated XDG environment
+  against a real session: normal quit unaffected (<1s, no warning
+  logged).
+
 ## v3.2.0 — Nobara/KDE hardening pass
 
 Rewrite of the lifecycle, configuration, IPC, and installer layers on top
