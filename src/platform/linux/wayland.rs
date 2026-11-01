@@ -156,6 +156,44 @@ struct Runtime {
     first_error: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OutputSelection {
+    id: u32,
+    name: String,
+    position: (i32, i32),
+}
+
+fn select_output_ids(config: &Config, outputs: &[OutputSelection]) -> Result<Vec<u32>, String> {
+    let mut ordered = outputs.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|output| (output.position, output.id));
+
+    let selected = match config.monitor_mode.as_str() {
+        // wl_output does not define a standard primary-output flag. In the absence of
+        // a compositor-specific adapter, the top-left-most output is the deterministic fallback.
+        "primary" => ordered
+            .into_iter()
+            .take(1)
+            .map(|output| output.id)
+            .collect(),
+        "name" => ordered
+            .into_iter()
+            .filter(|output| output.name == config.monitor_name)
+            .nth(config.monitor_name_ordinal as usize)
+            .map(|output| vec![output.id])
+            .unwrap_or_default(),
+        "index" => ordered
+            .into_iter()
+            .nth(config.monitor_index as usize)
+            .map(|output| vec![output.id])
+            .unwrap_or_default(),
+        "active" => {
+            return Err("Cursor-active monitor selection is not exposed to ordinary Wayland clients on this compositor. Choose all, primary, or a named monitor.".into());
+        }
+        _ => ordered.into_iter().map(|output| output.id).collect(),
+    };
+    Ok(selected)
+}
+
 impl Runtime {
     fn selected_outputs(
         &self,
@@ -172,29 +210,24 @@ impl Runtime {
             .filter_map(|output| self.output_state.info(&output).map(|info| (output, info)))
             .collect::<Vec<_>>();
         outputs.sort_by_key(|(_, info)| (info.logical_position.unwrap_or(info.location), info.id));
-        let selected = match self.config.monitor_mode.as_str() {
-            // wl_output does not define a standard primary-output flag. Until a compositor-specific
-            // primary-output adapter is available, the first advertised output is used.
-            "primary" => outputs.into_iter().take(1).collect(),
-            "name" => {
-                let target = self.config.monitor_name.as_str();
-                let ordinal = self.config.monitor_name_ordinal as usize;
-                outputs
-                    .into_iter()
-                    .filter(|(_, info)| {
-                        info.name.as_deref().filter(|name| !name.is_empty())
-                            .map(str::to_string)
-                            .unwrap_or_else(|| format!("Output {}", info.id)) == target
-                    })
-                    .nth(ordinal)
-                    .into_iter()
-                    .collect()
-            }
-            "index" => outputs.into_iter().nth(self.config.monitor_index as usize).into_iter().collect(),
-            "active" => return Err("Cursor-active monitor selection is not exposed to ordinary Wayland clients on this compositor. Choose all, primary, or a named monitor.".into()),
-            _ => outputs,
-        };
-        Ok(selected)
+        let candidates = outputs
+            .iter()
+            .map(|(_, info)| OutputSelection {
+                id: info.id,
+                name: info
+                    .name
+                    .as_deref()
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("Output {}", info.id)),
+                position: info.logical_position.unwrap_or(info.location),
+            })
+            .collect::<Vec<_>>();
+        let selected_ids = select_output_ids(&self.config, &candidates)?;
+        Ok(outputs
+            .into_iter()
+            .filter(|(_, info)| selected_ids.contains(&info.id))
+            .collect())
     }
 
     fn reconcile_outputs(&mut self, qh: &QueueHandle<Self>) -> Result<(), String> {
@@ -709,3 +742,85 @@ impl ProvidesRegistryState for OutputQuery {
 
 delegate_output!(OutputQuery);
 delegate_registry!(OutputQuery);
+
+#[cfg(test)]
+mod output_selection_tests {
+    use super::*;
+
+    fn output(id: u32, name: &str, x: i32, y: i32) -> OutputSelection {
+        OutputSelection {
+            id,
+            name: name.into(),
+            position: (x, y),
+        }
+    }
+
+    fn fixture_outputs() -> Vec<OutputSelection> {
+        vec![
+            output(3, "HDMI-A-2", 1920, 0),
+            output(2, "DP-1", -1920, 0),
+            output(1, "DP-1", 0, 0),
+        ]
+    }
+
+    #[test]
+    fn all_outputs_are_returned_in_stable_position_then_id_order() {
+        let mut config = Config::default();
+        config.monitor_mode = "all".into();
+
+        assert_eq!(
+            select_output_ids(&config, &fixture_outputs()).unwrap(),
+            [2, 1, 3]
+        );
+    }
+
+    #[test]
+    fn primary_fallback_is_the_top_left_most_output() {
+        let mut config = Config::default();
+        config.monitor_mode = "primary".into();
+
+        assert_eq!(select_output_ids(&config, &fixture_outputs()).unwrap(), [2]);
+    }
+
+    #[test]
+    fn index_selection_uses_the_same_stable_output_order() {
+        let mut config = Config::default();
+        config.monitor_mode = "index".into();
+        config.monitor_index = 1;
+
+        assert_eq!(select_output_ids(&config, &fixture_outputs()).unwrap(), [1]);
+    }
+
+    #[test]
+    fn duplicate_connector_names_use_the_saved_ordinal_after_position_sorting() {
+        let mut config = Config::default();
+        config.monitor_mode = "name".into();
+        config.monitor_name = "DP-1".into();
+        config.monitor_name_ordinal = 1;
+
+        assert_eq!(select_output_ids(&config, &fixture_outputs()).unwrap(), [1]);
+    }
+
+    #[test]
+    fn missing_named_output_returns_no_match_instead_of_another_monitor() {
+        let mut config = Config::default();
+        config.monitor_mode = "name".into();
+        config.monitor_name = "DP-3".into();
+
+        assert!(
+            select_output_ids(&config, &fixture_outputs())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn cursor_active_selection_fails_with_an_actionable_wayland_message() {
+        let mut config = Config::default();
+        config.monitor_mode = "active".into();
+
+        let error = select_output_ids(&config, &fixture_outputs()).unwrap_err();
+        assert!(error.contains("Cursor-active monitor selection"));
+        assert!(error.contains("named monitor"));
+    }
+}

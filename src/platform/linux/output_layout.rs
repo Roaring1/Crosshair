@@ -36,13 +36,20 @@ fn build_from_metadata(
     current_mode: Option<(i32, i32)>,
     output_scale: i32,
 ) -> Result<OutputLayout, String> {
+    let scale = output_scale.clamp(1, 4) as u32;
+    if logical_size.is_none() && output_scale > 4 && current_mode.is_some() {
+        return Err(format!(
+            "Output {} reports scale {output_scale}x but has no logical dimensions; refusing an ambiguous fallback",
+            output_name.unwrap_or("unknown")
+        ));
+    }
     let (width, height) = logical_size
         .or_else(|| {
             current_mode.map(|(physical_width, physical_height)| {
-                let reported_scale = output_scale.max(1);
+                let buffer_scale = scale as i32;
                 (
-                    physical_width / reported_scale,
-                    physical_height / reported_scale,
+                    physical_width / buffer_scale,
+                    physical_height / buffer_scale,
                 )
             })
         })
@@ -63,7 +70,6 @@ fn build_from_metadata(
         .filter(|name| !name.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| format!("Output {output_id}"));
-    let scale = output_scale.clamp(1, 4) as u32;
     let raster = render_crosshair_scaled(config, scale).map_err(|error| error.to_string())?;
     let logical_width = raster.width.div_ceil(scale);
     let logical_height = raster.height.div_ceil(scale);
@@ -140,6 +146,24 @@ mod tests {
             .is_err()
         );
         assert!(build_from_metadata(&Config::default(), 1, None, None, None, 1).is_err());
+    }
+
+    #[test]
+    fn refuses_extreme_scale_fallback_without_logical_dimensions() {
+        let error = match build_from_metadata(
+            &Config::default(),
+            3,
+            Some("DP-2"),
+            None,
+            Some((7680, 4320)),
+            16,
+        ) {
+            Ok(_) => panic!("ambiguous extreme-scale fallback should fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("scale 16x"));
+        assert!(error.contains("no logical dimensions"));
     }
 
     #[test]
