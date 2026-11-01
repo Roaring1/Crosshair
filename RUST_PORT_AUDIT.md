@@ -117,7 +117,7 @@ The Rust Settings UI is built in Slint (software renderer), not GTK, egui or a w
 | GTK3 Settings widgets | No | Rebuild the controls in a portable Rust GUI |
 | GDK monitor enumeration | No | Wayland/XRandR and Win32 monitor APIs |
 | GTK Layer Shell overlay | No | Native Wayland layer-shell backend; separate X11 backend; Win32 layered window |
-| Cairo drawing | Algorithm is reusable | Small software rasterizer can draw the same pixels without GTK/Cairo |
+| Cairo drawing | Geometry and layer order are reusable | Small software rasterizer is compared against the Cairo reference using shape bounds and antialiasing-tolerant coverage metrics |
 | .desktop / XDG autostart | No | Windows Start Menu/Startup registration and uninstall path |
 | Tray/AppIndicator | Intentionally dropped | No Linux or Windows tray process in the target design |
 
@@ -158,7 +158,7 @@ The Windows and Linux builds are separate artifacts. Rust target triples support
 ## Porting exit criteria
 
 - [ ] Rust config reads current Python-generated JSON without destructive migration; unknown and invalid fields are handled deterministically.
-- [ ] All eight supported shapes and all appearance settings match the Python renderer, including edge extents, outline, shadow and second-dot placement.
+- [x] Shared Python/Rust renderer parity: all nine persisted shape values (including the `circle` alias), main/outline/shadow layers, colors and opacity passed 20 representative Cairo comparisons with exact alpha bounds, at most 7.6% alpha-mass difference and at most 3.77/255 mean premultiplied-channel error. Rust-only reference-dot color, opacity and offset have separate unit coverage. The parity matrix is representative, not exhaustive.
 - [ ] Multi-monitor targeting and hotplug behavior verified on real OS APIs.
 - [ ] Input pass-through, no-focus and topmost behavior verified per backend.
 - [ ] All CLI operations and cold/live toggle semantics retained.
@@ -176,8 +176,9 @@ This section records what was actually built and exercised on the Nobara x86_64 
 ### Current verification
 
 - `cargo check --features settings-ui --bins`: passed.
-- `cargo test --locked --features settings-ui --all-targets`: **23 passed** (21 shared-core/renderer/filesystem tests and two Settings-worker/preview regressions).
+- `cargo test --locked --features settings-ui --all-targets`: **26 passed** (24 shared-core/renderer/filesystem tests and two Settings-worker/preview regressions).
 - Debug and optimized Linux builds of both executables: passed.
+- `cargo build --locked --example render_probe` and `python3 tests/render-parity.py`: passed; 20 representative Python/Cairo-vs-Rust cases with exact alpha bounds, maximum 7.6% alpha-mass difference and maximum 3.77/255 mean premultiplied-channel error.
 - `cargo check --locked --target x86_64-pc-windows-msvc --features settings-ui --bins`: passed from the Linux host using the isolated Rust 1.96.0 MSVC standard-library target. This proves compile compatibility only; it does not test the Win32 overlay, window behavior or named-pipe security.
 - `git diff --check`: passed.
 - Python fallback: **99 tests passed**, Ruff clean, the repository's Bandit medium/high gate passed, and `pip-audit` found no known vulnerabilities.
@@ -189,6 +190,7 @@ This section records what was actually built and exercised on the Nobara x86_64 
 - Settings delayed-IPC/autostart/shutdown test under Xvfb: passed three consecutive times. A fake Unix socket accepts an overlay update and delays its reply for 1.5 seconds; Settings still processes the Appearance tab click and resizes to 420 px. The test queues Install autostart behind the in-flight preview, then immediately sends a direct X11 `WM_DELETE_WINDOW` message before either operation has completed. Worker shutdown drains the queued CLI action after the IPC task, the autostart entry exists after exit, Settings closes cleanly, and the final close flush persists `enabled=true`.
 - Settings IPC drop/recovery smoke under Xvfb: passed three consecutive times. The fake peer accepts the first enabled-state update and closes without acknowledging it; the test confirms the failed update was not persisted. A later user update succeeds against the recovered peer, persists `enabled=true`, and Settings closes cleanly.
 - Settings rapid-edit/socket-replacement smoke under Xvfb: passed three consecutive times. The fake old listener accepts the first preview and withholds its response while four more setting edits are made. The test atomically replaces the socket path with a ready listener, then verifies stale queued previews are skipped, only the final `enabled=true` update reaches the replacement listener and persists, and Settings closes cleanly. This is a controlled IPC handoff test, not a real compositor or overlay-process crash/restart test.
+- Rust/Cairo renderer parity: passed 20 representative cases across all nine persisted shape values, including the `circle` alias, outline/shadow layering, opacity and edge geometry. Alpha bounds were exact in every case; the largest alpha-mass difference was 7.6% and largest mean premultiplied-channel error was 3.77/255. The harness uses the frozen Python drawing procedure and allows for Cairo-versus-2x2-sampler antialiasing differences. A thick zero-gap cross exposed repeated source-over blending at arm intersections; Rust now evaluates combined stroke-path coverage as a union before blending. Rust-only second-dot behavior is unit-tested separately.
 - The compact General, Appearance and System-popup layouts were captured and visually inspected under Xvfb. The separate Settings-close regression passed; a later multi-page screenshot harness did not close its window after opening the System popup, so popup-open close behavior is not counted as verified.
 - The system toolchain did not ship `rustfmt`; to avoid changing the Nobara package set, Rust 1.96.0 and its matching formatter were installed under `/tmp`. `cargo fmt --all -- --check` passes locally. The CI job independently installs stable Rust plus rustfmt and runs the same formatter gate.
 
@@ -221,7 +223,7 @@ These figures are a controlled Xvfb/X11 baseline, not a measurement on the targe
 4. **Installer packaging and transaction rollback remain.** Linux optional XDG autostart and the confirmed Settings uninstall path are implemented. Linux CLI/Settings binaries and the app-menu entry now use no-follow, owner-checked atomic writes; uninstall validates all app-owned targets before deleting any. The multi-file install is not a single transaction, so an I/O failure after one atomic artifact replacement can still leave an incomplete upgrade; add staging/rollback before calling packaging complete. Icon metadata and clean-machine dependency checks also remain. Windows/macOS installers and login-startup equivalents are unimplemented. The Padfire-first default remains no autostart.
 5. **Settings worker stress/lifecycle coverage is substantially exercised, but real daemon restart remains unverified.** Xvfb tests cover delayed IPC responsiveness, graceful close/worker join/final auto-save, queued CLI-action draining at shutdown, recovery after a dropped acknowledgement, and rapid edits across an atomic socket-listener replacement. The replacement-listener test does not exercise a live overlay process crash/restart or its compositor interactions.
 6. **Persistence and IPC stress coverage is incomplete.** Add concurrent cold starts, lock ownership races, stale socket replacement, malformed/oversized requests, command timeouts, restart handoff, and close-during-debounce tests.
-7. **Renderer parity needs image-level comparison.** Unit tests cover bounds, alpha, geometry and profiles; compare raster output for all shapes and edge cases against the frozen Python renderer before asserting visual parity.
+7. **Renderer parity coverage is now representative, not exhaustive.** The 20-case Cairo comparison covers shared shape values, main/outline/shadow passes, color and opacity, and catches zero-gap stroke-overlap errors. Add property-based sweeps over all normalized parameter boundaries and retain screenshot/image inspection against the frozen GTK implementation.
 8. **Release packaging is still a prototype.** The Linux user installer now has isolated coverage for desktop-entry escaping, stale autostart cleanup, symlink refusal, all-target uninstall preflight and config retention. Still test staged upgrade/rollback from arbitrary install locations, icon metadata, dependency availability on clean Nobara/Fedora and Ubuntu systems, and decide on portable archive/AppImage/Flatpak/RPM plus a signed Windows installer separately.
 9. **Live target-machine gates remain outstanding.** Run on the actual KDE Wayland session, multiple monitors, fractional scaling, game fullscreen modes, and a genuinely low-end CPU/GPU/memory device. Record cold startup, file descriptors, steady-state PSS/CPU and Settings memory separately.
 

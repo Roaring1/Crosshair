@@ -243,10 +243,20 @@ fn draw_shape(
         }
         "cross" | "cross_dot" | "plus" => {
             let g = if shape == "plus" { 0.0 } else { gap };
-            draw_line(raster, cx, cy - g, cx, cy - g - size, width, color);
-            draw_line(raster, cx, cy + g, cx, cy + g + size, width, color);
-            draw_line(raster, cx - g, cy, cx - g - size, cy, width, color);
-            draw_line(raster, cx + g, cy, cx + g + size, cy, width, color);
+            // Cairo strokes all four subpaths as one operation. Evaluate their
+            // union before blending so arms that meet at zero gap are not
+            // composited repeatedly and made artificially opaque.
+            draw_segments(
+                raster,
+                &[
+                    (cx, cy - g, cx, cy - g - size),
+                    (cx, cy + g, cx, cy + g + size),
+                    (cx - g, cy, cx - g - size, cy),
+                    (cx + g, cy, cx + g + size, cy),
+                ],
+                width,
+                color,
+            );
             if shape == "cross_dot" {
                 let radius = if is_outline {
                     thickness * 0.9 + outline_thickness
@@ -258,39 +268,14 @@ fn draw_shape(
         }
         "x" | "x_dot" => {
             let g = gap;
-            draw_line(
+            draw_segments(
                 raster,
-                cx - g,
-                cy - g,
-                cx - g - size,
-                cy - g - size,
-                width,
-                color,
-            );
-            draw_line(
-                raster,
-                cx + g,
-                cy + g,
-                cx + g + size,
-                cy + g + size,
-                width,
-                color,
-            );
-            draw_line(
-                raster,
-                cx - g,
-                cy + g,
-                cx - g - size,
-                cy + g + size,
-                width,
-                color,
-            );
-            draw_line(
-                raster,
-                cx + g,
-                cy - g,
-                cx + g + size,
-                cy - g - size,
+                &[
+                    (cx - g, cy - g, cx - g - size, cy - g - size),
+                    (cx + g, cy + g, cx + g + size, cy + g + size),
+                    (cx - g, cy + g, cx - g - size, cy + g + size),
+                    (cx + g, cy - g, cx + g + size, cy - g - size),
+                ],
                 width,
                 color,
             );
@@ -347,16 +332,39 @@ fn stroke_circle(raster: &mut Raster, cx: f32, cy: f32, radius: f32, width: f32,
     );
 }
 
-fn draw_line(raster: &mut Raster, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: Rgba) {
+fn draw_segments(raster: &mut Raster, segments: &[(f32, f32, f32, f32)], width: f32, color: Rgba) {
+    if segments.is_empty() {
+        return;
+    }
     let half = width.max(0.5) / 2.0;
-    draw_coverage(
-        raster,
-        x0.min(x1) - half - 1.0,
-        y0.min(y1) - half - 1.0,
-        x0.max(x1) + half + 1.0,
-        y0.max(y1) + half + 1.0,
-        color,
-        |x, y| {
+    let min_x = segments
+        .iter()
+        .map(|(x0, _, x1, _)| x0.min(*x1))
+        .fold(f32::INFINITY, f32::min)
+        - half
+        - 1.0;
+    let min_y = segments
+        .iter()
+        .map(|(_, y0, _, y1)| y0.min(*y1))
+        .fold(f32::INFINITY, f32::min)
+        - half
+        - 1.0;
+    let max_x = segments
+        .iter()
+        .map(|(x0, _, x1, _)| x0.max(*x1))
+        .fold(f32::NEG_INFINITY, f32::max)
+        + half
+        + 1.0;
+    let max_y = segments
+        .iter()
+        .map(|(_, y0, _, y1)| y0.max(*y1))
+        .fold(f32::NEG_INFINITY, f32::max)
+        + half
+        + 1.0;
+
+    draw_coverage(raster, min_x, min_y, max_x, max_y, color, |x, y| {
+        let half_sq = half * half;
+        if segments.iter().any(|(x0, y0, x1, y1)| {
             let dx = x1 - x0;
             let dy = y1 - y0;
             let length_sq = dx * dx + dy * dy;
@@ -367,13 +375,13 @@ fn draw_line(raster: &mut Raster, x0: f32, y0: f32, x1: f32, y1: f32, width: f32
             };
             let nearest_x = x0 + t * dx;
             let nearest_y = y0 + t * dy;
-            if (x - nearest_x).powi(2) + (y - nearest_y).powi(2) <= half * half {
-                1.0
-            } else {
-                0.0
-            }
-        },
-    );
+            (x - nearest_x).powi(2) + (y - nearest_y).powi(2) <= half_sq
+        }) {
+            1.0
+        } else {
+            0.0
+        }
+    });
 }
 
 fn draw_coverage(
@@ -524,6 +532,82 @@ mod tests {
             (compact.width, compact.height),
             (unchanged.width, unchanged.height)
         );
+    }
+
+    #[test]
+    fn reference_dot_uses_its_own_opacity_color_and_offset() {
+        let mut config = Config::default();
+        config.opacity = 0.05;
+        config.outline.enabled = false;
+        config.reference_dot.enabled = true;
+        config.reference_dot.color = "#12abef".into();
+        config.reference_dot.opacity = 0.5;
+        config.reference_dot.size = 3;
+        config.reference_dot.offset_x = 40;
+        config.reference_dot.offset_y = -30;
+
+        let raster = render_crosshair(&config).unwrap();
+        let x = (i32::from(config.offset_x) + i32::from(config.reference_dot.offset_x)
+            - raster.origin_x) as u32;
+        let y = (i32::from(config.offset_y) + i32::from(config.reference_dot.offset_y)
+            - raster.origin_y) as u32;
+        let index = ((y * raster.width + x) * 4) as usize;
+        let pixel = &raster.bgra_premultiplied[index..index + 4];
+
+        assert_eq!(
+            pixel[3], 128,
+            "reference-dot opacity is independent of global opacity"
+        );
+        assert_eq!(
+            &pixel[..3],
+            &[120, 86, 9],
+            "reference-dot color is premultiplied BGRA"
+        );
+    }
+
+    #[test]
+    fn global_offset_moves_the_raster_origin_without_changing_its_pixels() {
+        let mut config = Config::default();
+        config.shape = "x_dot".into();
+        config.shadow.enabled = true;
+        let original = render_crosshair(&config).unwrap();
+
+        config.offset_x = 11;
+        config.offset_y = -8;
+        let shifted = render_crosshair(&config).unwrap();
+
+        assert_eq!(
+            (shifted.width, shifted.height),
+            (original.width, original.height)
+        );
+        assert_eq!(
+            (shifted.origin_x, shifted.origin_y),
+            (original.origin_x + 11, original.origin_y - 8)
+        );
+        assert_eq!(shifted.bgra_premultiplied, original.bgra_premultiplied);
+    }
+
+    #[test]
+    fn intersecting_stroke_subpaths_are_blended_once() {
+        for shape in ["cross", "plus", "x"] {
+            let mut config = Config::default();
+            config.shape = shape.into();
+            config.size = 10;
+            config.thickness = 6;
+            config.gap = 0;
+            config.opacity = 0.5;
+            config.outline.enabled = false;
+
+            let raster = render_crosshair(&config).unwrap();
+            let center_x = (i32::from(config.offset_x) - raster.origin_x) as u32;
+            let center_y = (i32::from(config.offset_y) - raster.origin_y) as u32;
+            let index = ((center_y * raster.width + center_x) * 4) as usize;
+            assert_eq!(
+                raster.bgra_premultiplied[index + 3],
+                128,
+                "{shape}: intersecting path segments must not accumulate alpha",
+            );
+        }
     }
 
     #[test]

@@ -96,6 +96,7 @@ jobs:
             libxkbcommon-x11-0 \
             libx11-dev \
             libxext-dev \
+            python3-cairo \
             xvfb \
             xdotool \
             x11-utils
@@ -113,6 +114,12 @@ jobs:
 
       - name: Build the Linux executables
         run: cargo build --locked --features settings-ui --bins
+
+      - name: Build renderer parity probe
+        run: cargo build --locked --example render_probe
+
+      - name: Compare Rust rendering with the Python Cairo reference
+        run: python3 tests/render-parity.py
 
       - name: Test isolated install, autostart and uninstall lifecycle
         run: bash tests/install-smoke.sh
