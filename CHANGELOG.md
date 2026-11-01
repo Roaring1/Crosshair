@@ -2,6 +2,14 @@
 
 ## Unreleased — 31/10/2026
 
+- **Fixed:** legacy `purplecrosshair` config migration now creates or verifies
+  the destination config directory with mode 0700 before writing the mode-0600
+  file. A symlinked destination is refused and logged rather than followed.
+- **Added:** adversarial IPC tests cover oversized frames, symlinked lock and
+  socket paths, lock release after failed server startup, and peer-UID
+  rejection. Migration tests verify private directory permissions and
+  symlink refusal.
+
 - **Fixed:** generated app-menu and desktop-shortcut entries no longer use
   `--daemon --no-ui`. Normal clicks now route through the default CLI
   activation path, which opens settings for an existing daemon or starts it

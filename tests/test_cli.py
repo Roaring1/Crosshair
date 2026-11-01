@@ -402,3 +402,36 @@ def test_request_restart_reports_failed_cold_start(tmp_path, monkeypatch):
 
     assert success is False
     assert error == "Could not start or contact the Crosshair daemon."
+
+
+def test_legacy_config_migration_keeps_directory_private(tmp_path):
+    paths = app_paths(tmp_path)
+    old_config = paths.home / ".config" / "purplecrosshair" / "config.json"
+    old_config.parent.mkdir(parents=True)
+    old_config.write_text('{"enabled": false}', encoding="utf-8")
+
+    crosshair._migrate_legacy_config(paths, core.setup_logging(paths))
+
+    assert paths.config_file.read_text(encoding="utf-8") == '{"enabled": false}'
+    assert paths.config_dir.stat().st_mode & 0o777 == 0o700
+    assert paths.config_file.stat().st_mode & 0o777 == 0o600
+
+
+def test_legacy_config_migration_refuses_symlink_destination(tmp_path):
+    paths = app_paths(tmp_path)
+    old_config = paths.home / ".config" / "purplecrosshair" / "config.json"
+    old_config.parent.mkdir(parents=True)
+    old_config.write_text('{"enabled": false}', encoding="utf-8")
+
+    real_config = tmp_path / "real-config"
+    real_config.mkdir()
+    sentinel = real_config / "keep.txt"
+    sentinel.write_text("preserve", encoding="utf-8")
+    paths.config_dir.parent.mkdir(parents=True)
+    paths.config_dir.symlink_to(real_config, target_is_directory=True)
+
+    crosshair._migrate_legacy_config(paths, core.setup_logging(paths))
+
+    assert paths.config_dir.is_symlink()
+    assert not (real_config / "config.json").exists()
+    assert sentinel.read_text(encoding="utf-8") == "preserve"

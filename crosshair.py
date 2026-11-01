@@ -225,9 +225,13 @@ def _migrate_legacy_config(paths: core.AppPaths, log: logging.Logger) -> None:
         return
     try:
         data = old_config.read_bytes()
+        # Migration is the one startup path that writes config without going
+        # through save_config(). Preserve the private config-directory mode
+        # here too, including on a fresh install under a permissive umask.
+        core.ensure_directory(paths.config_dir, 0o700)
         core.atomic_write_bytes(paths.config_file, data, mode=0o600)
         log.info("Migrated legacy config from %s to %s", old_config, paths.config_file)
-    except OSError as exc:
+    except (OSError, core.CoreError) as exc:
         log.warning("Legacy config migration failed: %s", exc)
 
 def install_self(paths: core.AppPaths) -> tuple[Path, Path]:
