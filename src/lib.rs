@@ -766,6 +766,11 @@ fn read_config(path: &Path) -> Result<Option<Vec<u8>>, CoreError> {
 
 #[cfg(target_os = "linux")]
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
+    atomic_write_mode(path, bytes, 0o600)
+}
+
+#[cfg(target_os = "linux")]
+fn atomic_write_mode(path: &Path, bytes: &[u8], file_mode: libc::mode_t) -> Result<(), CoreError> {
     use std::ffi::CString;
     use std::io::Write;
     use std::os::fd::{AsRawFd, FromRawFd};
@@ -800,12 +805,17 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
         let kind = metadata.st_mode & libc::S_IFMT;
         if kind == libc::S_IFLNK {
             return Err(CoreError::Config(
-                "refusing to replace a symlinked config file".into(),
+                "refusing to replace a symlinked file".into(),
             ));
         }
         if kind != libc::S_IFREG {
             return Err(CoreError::Config(
-                "config destination is not a regular file".into(),
+                "destination is not a regular file".into(),
+            ));
+        }
+        if metadata.st_uid != unsafe { libc::geteuid() } {
+            return Err(CoreError::Config(
+                "refusing to replace a file not owned by this user".into(),
             ));
         }
         if metadata.st_nlink != 1 {
@@ -834,11 +844,19 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
             directory.as_raw_fd(),
             temporary.as_ptr(),
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            0o600,
+            file_mode,
         )
     };
     if fd < 0 {
         return Err(std::io::Error::last_os_error().into());
+    }
+    if unsafe { libc::fchmod(fd, file_mode) } != 0 {
+        let error = std::io::Error::last_os_error();
+        unsafe {
+            libc::close(fd);
+            libc::unlinkat(directory.as_raw_fd(), temporary.as_ptr(), 0);
+        }
+        return Err(error.into());
     }
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
     let write_result = file.write_all(bytes).and_then(|()| file.sync_all());
@@ -951,6 +969,188 @@ fn secure_create_dir(path: &Path) -> Result<(), CoreError> {
         Ok(_) => Err(CoreError::Config("unsafe config directory".into())),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Preflight every destination before a multi-file install starts. Parent
+/// directories are created/pinned without symlink traversal and made private;
+/// existing targets must be single-link regular files owned by this user.
+#[cfg(target_os = "linux")]
+pub fn validate_user_file_targets(paths: &[&Path]) -> Result<(), CoreError> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    for path in paths {
+        let parent = path
+            .parent()
+            .ok_or_else(|| CoreError::Config("file path has no parent".into()))?;
+        let directory = match open_directory_linux(parent, false, false) {
+            Ok(directory) => directory,
+            Err(CoreError::Io(error)) if error.raw_os_error() == Some(libc::ENOENT) => continue,
+            Err(error) => return Err(error),
+        };
+        let mut parent_metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(directory.as_raw_fd(), parent_metadata.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let parent_metadata = unsafe { parent_metadata.assume_init() };
+        if parent_metadata.st_uid != unsafe { libc::geteuid() } {
+            return Err(CoreError::Config(
+                "install destination directory is not owned by this user".into(),
+            ));
+        }
+
+        let leaf = path
+            .file_name()
+            .ok_or_else(|| CoreError::Config("invalid filename".into()))?;
+        let leaf = CString::new(leaf.as_bytes())
+            .map_err(|_| CoreError::Config("filename contains a NUL byte".into()))?;
+
+        let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+        let status = unsafe {
+            libc::fstatat(
+                directory.as_raw_fd(),
+                leaf.as_ptr(),
+                metadata.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if status != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ENOENT) {
+                continue;
+            }
+            return Err(error.into());
+        }
+
+        let metadata = unsafe { metadata.assume_init() };
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(CoreError::Config(
+                "refusing to replace a symlink or non-regular file".into(),
+            ));
+        }
+        if metadata.st_uid != unsafe { libc::geteuid() } {
+            return Err(CoreError::Config(
+                "refusing to replace a file not owned by this user".into(),
+            ));
+        }
+        if metadata.st_nlink != 1 {
+            return Err(CoreError::Config(
+                "refusing to replace a multiply-linked file".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Atomically write a user-owned application file using pinned directory
+/// handles, no-follow traversal and owner-private file/directory permissions.
+#[cfg(target_os = "linux")]
+pub fn atomic_write_user_file(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
+    atomic_write(path, bytes)
+}
+
+/// Atomically install an owner-only executable (0700) under a private
+/// directory. Suitable for per-user application binaries in XDG_BIN_HOME.
+#[cfg(target_os = "linux")]
+pub fn atomic_write_user_executable(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
+    atomic_write_mode(path, bytes, 0o700)
+}
+
+/// Remove one user-owned regular file without following directory or file
+/// symlinks. Hard-linked and non-regular destinations are refused.
+#[cfg(target_os = "linux")]
+pub fn remove_user_file(path: &Path) -> Result<bool, CoreError> {
+    Ok(remove_user_files(&[path])? > 0)
+}
+
+/// Validate every target before removing any of them. Each parent directory is
+/// opened without following symlinks and pinned until its target is unlinked.
+/// Shared/group-writable parents and files not owned solely by this user are
+/// rejected. Missing parents/files are treated as already removed.
+#[cfg(target_os = "linux")]
+pub fn remove_user_files(paths: &[&Path]) -> Result<usize, CoreError> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut targets: Vec<(OwnedFd, CString)> = Vec::new();
+    for path in paths {
+        let parent = path
+            .parent()
+            .ok_or_else(|| CoreError::Config("file path has no parent".into()))?;
+        let directory = match open_directory_linux(parent, false, false) {
+            Ok(directory) => directory,
+            Err(CoreError::Io(error)) if error.raw_os_error() == Some(libc::ENOENT) => {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+
+        let mut directory_metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(directory.as_raw_fd(), directory_metadata.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let directory_metadata = unsafe { directory_metadata.assume_init() };
+        if directory_metadata.st_mode & libc::S_IFMT != libc::S_IFDIR
+            || directory_metadata.st_uid != unsafe { libc::geteuid() }
+            || directory_metadata.st_mode & 0o022 != 0
+        {
+            return Err(CoreError::Config(
+                "refusing removal from a directory not privately controlled by this user".into(),
+            ));
+        }
+
+        let leaf = path
+            .file_name()
+            .ok_or_else(|| CoreError::Config("invalid filename".into()))?;
+        let leaf = CString::new(leaf.as_bytes())
+            .map_err(|_| CoreError::Config("filename contains a NUL byte".into()))?;
+
+        let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+        let status = unsafe {
+            libc::fstatat(
+                directory.as_raw_fd(),
+                leaf.as_ptr(),
+                metadata.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if status != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ENOENT) {
+                continue;
+            }
+            return Err(error.into());
+        }
+
+        let metadata = unsafe { metadata.assume_init() };
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(CoreError::Config(
+                "refusing to remove a symlink or non-regular file".into(),
+            ));
+        }
+        if metadata.st_uid != unsafe { libc::geteuid() } {
+            return Err(CoreError::Config(
+                "refusing to remove a file not owned by this user".into(),
+            ));
+        }
+        if metadata.st_nlink != 1 {
+            return Err(CoreError::Config(
+                "refusing to remove a multiply-linked file".into(),
+            ));
+        }
+
+        targets.push((directory, leaf));
+    }
+
+    let count = targets.len();
+    for (directory, leaf) in targets {
+        if unsafe { libc::unlinkat(directory.as_raw_fd(), leaf.as_ptr(), 0) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -1085,6 +1285,102 @@ mod tests {
             0o700
         );
         assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn user_file_write_is_atomic_private_and_removable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("bin/crosshair");
+        atomic_write_user_executable(&executable, b"#!/bin/sh\nexit 0\n").unwrap();
+        assert_eq!(
+            executable.metadata().unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        let path = dir.path().join("config/autostart/crosshair.desktop");
+        atomic_write_user_file(&path, b"[Desktop Entry]\nName=Crosshair\n").unwrap();
+
+        assert_eq!(
+            path.parent()
+                .unwrap()
+                .metadata()
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"[Desktop Entry]\nName=Crosshair\n"
+        );
+
+        atomic_write_user_file(&path, b"[Desktop Entry]\nName=Updated\n").unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"[Desktop Entry]\nName=Updated\n"
+        );
+        assert!(remove_user_file(&path).unwrap());
+        assert!(!remove_user_file(&path).unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn user_file_removal_refuses_symlinks_and_hard_links() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("autostart");
+        std::fs::create_dir(&parent).unwrap();
+
+        let target = dir.path().join("outside.desktop");
+        std::fs::write(&target, b"preserve").unwrap();
+        let linked = parent.join("crosshair.desktop");
+        symlink(&target, &linked).unwrap();
+        assert!(remove_user_file(&linked).is_err());
+        assert!(linked.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&target).unwrap(), b"preserve");
+        std::fs::remove_file(&linked).unwrap();
+
+        atomic_write_user_file(&linked, b"owned").unwrap();
+        let second = dir.path().join("second-link");
+        std::fs::hard_link(&linked, &second).unwrap();
+        assert!(remove_user_file(&linked).is_err());
+        assert_eq!(std::fs::read(&linked).unwrap(), b"owned");
+        assert_eq!(std::fs::read(&second).unwrap(), b"owned");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn user_file_batch_removal_preflights_all_targets_and_rejects_shared_directories() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempfile::tempdir().unwrap();
+        let first_dir = dir.path().join("first");
+        let second_dir = dir.path().join("second");
+        std::fs::create_dir(&first_dir).unwrap();
+        std::fs::create_dir(&second_dir).unwrap();
+        let first = first_dir.join("crosshair");
+        let outside = dir.path().join("outside");
+        let second = second_dir.join("autostart.desktop");
+        std::fs::write(&first, b"keep-until-all-validated").unwrap();
+        std::fs::write(&outside, b"outside").unwrap();
+        symlink(&outside, &second).unwrap();
+
+        assert!(remove_user_files(&[&first, &second]).is_err());
+        assert_eq!(std::fs::read(&first).unwrap(), b"keep-until-all-validated");
+        assert!(second.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
+
+        std::fs::remove_file(&second).unwrap();
+        std::fs::write(&second, b"owned").unwrap();
+        std::fs::set_permissions(&second_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(remove_user_file(&second).is_err());
+        assert_eq!(std::fs::read(&second).unwrap(), b"owned");
     }
 
     #[cfg(unix)]

@@ -3,7 +3,8 @@ import { Button, CheckBox, ComboBox, LineEdit, Slider, SpinBox, Switch, ScrollVi
 export component SettingsWindow inherits Window {
     title: "";
     width: 560px;
-    height: root.active-tab == 0 && !root.shortcuts-expanded && !root.profile-panel-visible ? 250px : 420px;
+    height: (root.active-tab == 0 && !root.shortcuts-expanded && !root.profile-panel-visible ? 250px : 420px)
+        + (root.system-feedback != "" ? 44px : 0px);
     animate height {
         duration: 140ms;
         easing: ease-in-out;
@@ -58,6 +59,7 @@ export component SettingsWindow inherits Window {
     in-out property <bool> profile-is-export: false;
     in-out property <string> profile-code: "";
     in-out property <string> profile-feedback: "";
+    in-out property <string> system-feedback: "";
 
     callback settings_changed();
     callback save_requested();
@@ -71,6 +73,39 @@ export component SettingsWindow inherits Window {
     callback refresh_monitors();
     callback uninstall_app();
 
+
+    uninstall-confirm := PopupWindow {
+        x: root.width / 2 - self.width / 2;
+        y: root.height / 2 - self.height / 2;
+        width: 304px;
+        height: 126px;
+        Rectangle {
+            background: Palette.background;
+            width: 100%;
+            height: 100%;
+            VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
+                Text {
+                    text: "Uninstall Crosshair?";
+                    font-weight: 600;
+                }
+                Text {
+                    text: "The app files and menu entry will be removed. Your settings will be kept.";
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    HorizontalLayout { }
+                    Button { text: "Cancel"; clicked => { uninstall-confirm.close(); } }
+                    Button {
+                        text: "Uninstall";
+                        primary: true;
+                        clicked => { root.uninstall_app(); uninstall-confirm.close(); }
+                    }
+                }
+            }
+        }
+    }
 
     system-menu := PopupWindow {
         x: root.width - self.width - 12px;
@@ -102,7 +137,7 @@ export component SettingsWindow inherits Window {
             Button { text: "Open config folder"; clicked => { root.open_config_folder(); system-menu.close(); } }
             Button { text: "Reload config"; clicked => { root.reload_config(); system-menu.close(); } }
             Button { text: "Refresh monitors"; clicked => { root.refresh_monitors(); system-menu.close(); } }
-            Button { text: "Uninstall"; clicked => { root.uninstall_app(); system-menu.close(); } }
+            Button { text: "Uninstall"; clicked => { uninstall-confirm.show(); system-menu.close(); } }
             }
         }
     }
@@ -216,6 +251,14 @@ export component SettingsWindow inherits Window {
                     Button { text: "Reset"; width: 90px; height: 28px; clicked => { root.reset_requested(); } }
                     if !root.auto-save: Button { text: "Save"; width: 90px; height: 28px; primary: true; clicked => { root.save_requested(); } }
                 }
+
+                if root.system-feedback != "":
+                    Text {
+                        text: root.system-feedback;
+                        color: Palette.foreground;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                    }
 
                 Rectangle { height: 1px; background: Palette.border; }
 

@@ -93,6 +93,7 @@ jobs:
             libfontconfig1-dev \
             libwayland-dev \
             libxkbcommon-dev \
+            libxkbcommon-x11-0 \
             libx11-dev \
             libxext-dev \
             xvfb \
@@ -113,8 +114,14 @@ jobs:
       - name: Build the Linux executables
         run: cargo build --locked --features settings-ui --bins
 
+      - name: Test isolated install, autostart and uninstall lifecycle
+        run: bash tests/install-smoke.sh
+
       - name: Test X11 click-through and cold-start lifecycle
         run: xvfb-run -a bash tests/x11-smoke.sh
+
+      - name: Test Settings autostart buttons and independent overlay lifetime
+        run: xvfb-run -a bash tests/settings-autostart-smoke.sh
 
       - name: Test Settings close and independent overlay lifetime
         run: xvfb-run -a bash tests/settings-close-smoke.sh

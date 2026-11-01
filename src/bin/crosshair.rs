@@ -6,6 +6,11 @@ mod wayland;
 mod x11;
 
 use crosshair_core::{APP_VERSION, AppPaths, Config};
+#[cfg(target_os = "linux")]
+use crosshair_core::{
+    atomic_write_user_executable, atomic_write_user_file, remove_user_file, remove_user_files,
+    validate_user_file_targets,
+};
 #[cfg(unix)]
 use std::io::{BufRead, BufReader, Read, Write};
 use std::{
@@ -223,29 +228,174 @@ fn open_folder(paths: &AppPaths) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn install_bin_dir() -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| "HOME is not set to an absolute path".to_string())?;
+    Ok(std::env::var_os("XDG_BIN_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".local/bin")))
+}
+
+#[cfg(target_os = "windows")]
+fn install_bin_dir() -> Result<PathBuf, String> {
+    let local = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| "LOCALAPPDATA is not set to an absolute path".to_string())?;
+    Ok(local.join("Programs/Crosshair"))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn install_bin_dir() -> Result<PathBuf, String> {
+    Err("Installation is not implemented for this platform yet.".into())
+}
+
+#[cfg(target_os = "linux")]
+fn autostart_entry_path() -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| "HOME is not set to an absolute path".to_string())?;
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".config"));
+    Ok(config_home.join("autostart").join("crosshair.desktop"))
+}
+
+#[cfg(target_os = "linux")]
+fn applications_entry_path() -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| "HOME is not set to an absolute path".to_string())?;
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".local/share"));
+    Ok(data_home.join("applications").join("crosshair.desktop"))
+}
+
+#[cfg(target_os = "linux")]
+fn read_install_source(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // Debug Settings builds can exceed 250 MiB because of Slint metadata;
+    // keep installs bounded while supporting both debug and release artifacts.
+    const MAX_INSTALL_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let source = options.open(path).map_err(|error| {
+        format!(
+            "Could not safely open install source {}: {error}",
+            path.display()
+        )
+    })?;
+    let metadata = source.metadata().map_err(|error| {
+        format!(
+            "Could not inspect install source {}: {error}",
+            path.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "Install source is not a regular file: {}",
+            path.display()
+        ));
+    }
+    if metadata.len() > MAX_INSTALL_SOURCE_BYTES {
+        return Err(format!(
+            "Install source is unexpectedly large: {}",
+            path.display()
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    source
+        .take(MAX_INSTALL_SOURCE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("Could not read install source {}: {error}", path.display()))?;
+    if bytes.len() as u64 > MAX_INSTALL_SOURCE_BYTES {
+        return Err(format!(
+            "Install source grew beyond the size limit: {}",
+            path.display()
+        ));
+    }
+    Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_entry_value(path: &Path) -> Result<String, String> {
+    let value = path
+        .to_str()
+        .ok_or_else(|| "Desktop entry path is not valid UTF-8".to_string())?;
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err("Desktop entry path contains control characters".into());
+    }
+    Ok(value.replace('\\', "\\\\"))
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_entry_exec(path: &Path, arguments: &str) -> Result<String, String> {
+    let value = path
+        .to_str()
+        .ok_or_else(|| "Desktop launcher path is not valid UTF-8".to_string())?;
+    if value.is_empty() || value.contains('=') || value.chars().any(char::is_control) {
+        return Err("Desktop launcher path contains unsupported characters".into());
+    }
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('`', "\\`")
+        .replace('$', "\\$")
+        .replace('%', "%%");
+    Ok(format!("\"{escaped}\" {arguments}"))
+}
+
+#[cfg(target_os = "linux")]
+fn remove_autostart_entry() -> Result<bool, String> {
+    let path = autostart_entry_path()?;
+    remove_user_file(&path).map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn install_autostart() -> Result<(), String> {
+    // The ordinary installer intentionally removes stale autostart. Recreate
+    // it only after the user explicitly requests login startup.
+    install()?;
+    let entry = autostart_entry_path()?;
+    let executable = install_bin_dir()?.join("crosshair");
+    let exec = desktop_entry_exec(&executable, "--daemon --no-ui")?;
+    let try_exec = desktop_entry_value(&executable)?;
+    let content = format!(
+        "[Desktop Entry]\nType=Application\nVersion=1.0\nName=Crosshair\nComment=Crosshair overlay\nTryExec={try_exec}\nExec={exec}\nTerminal=false\nCategories=Utility;\nStartupNotify=false\nX-KDE-autostart-after=panel\nNoDisplay=true\n"
+    );
+    atomic_write_user_file(&entry, content.as_bytes()).map_err(|error| error.to_string())?;
+    println!("Optional login autostart enabled at {}.", entry.display());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn remove_autostart() -> Result<(), String> {
+    let path = autostart_entry_path()?;
+    if remove_user_file(&path).map_err(|error| error.to_string())? {
+        println!("Login autostart removed. Crosshair remains available through Padfire.");
+    } else {
+        println!("No Crosshair login autostart entry was installed.");
+    }
+    Ok(())
+}
+
 fn install() -> Result<(), String> {
-    let paths = AppPaths::discover().map_err(|error| error.to_string())?;
     let current = std::env::current_exe().map_err(|error| error.to_string())?;
     let settings = sibling_executable("crosshair-settings")?;
-    #[cfg(target_os = "linux")]
-    let bin_dir = {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| "HOME is not set".to_string())?;
-        std::env::var_os("XDG_BIN_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .unwrap_or_else(|| home.join(".local/bin"))
-    };
-    #[cfg(target_os = "windows")]
-    let bin_dir = {
-        let local = std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .ok_or_else(|| "LOCALAPPDATA is not set".to_string())?;
-        local.join("Programs/Crosshair")
-    };
-    std::fs::create_dir_all(&bin_dir)
-        .map_err(|error| format!("Could not create {}: {error}", bin_dir.display()))?;
+    let bin_dir = install_bin_dir()?;
     let target_cli = bin_dir.join(if cfg!(windows) {
         "crosshair.exe"
     } else {
@@ -256,86 +406,68 @@ fn install() -> Result<(), String> {
     } else {
         "crosshair-settings"
     });
-    std::fs::copy(&current, &target_cli)
-        .map_err(|error| format!("Could not install CLI: {error}"))?;
-    std::fs::copy(&settings, &target_settings)
-        .map_err(|error| format!("Could not install Settings: {error}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&target_cli, std::fs::Permissions::from_mode(0o755)).ok();
-        std::fs::set_permissions(&target_settings, std::fs::Permissions::from_mode(0o755)).ok();
-    }
+
     #[cfg(target_os = "linux")]
     {
-        let applications = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .unwrap_or_else(|| {
-                std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_default()
-                    .join(".local/share")
-            })
-            .join("applications");
-        std::fs::create_dir_all(&applications).map_err(|error| error.to_string())?;
+        let current_bytes = read_install_source(&current)?;
+        let settings_bytes = read_install_source(&settings)?;
+        let app_entry = applications_entry_path()?;
+        let app_exec = desktop_entry_exec(&target_cli, "--config")?;
         let desktop = format!(
-            "[Desktop Entry]\nType=Application\nName=Crosshair\nComment=Configure the Crosshair overlay\nExec={} --config\nTerminal=false\nCategories=Utility;\nStartupWMClass=crosshair\n",
-            target_cli.display()
+            "[Desktop Entry]\nType=Application\nName=Crosshair\nComment=Configure the Crosshair overlay\nExec={app_exec}\nTerminal=false\nCategories=Utility;\nStartupWMClass=crosshair\n"
         );
-        std::fs::write(applications.join("crosshair.desktop"), desktop)
+
+        validate_user_file_targets(&[&target_cli, &target_settings, &app_entry])
+            .map_err(|error| format!("Install destinations are not safe: {error}"))?;
+        // Only disable a previous explicit login startup after every install
+        // destination has passed preflight and before replacing any artifact.
+        remove_autostart_entry()?;
+        atomic_write_user_executable(&target_cli, &current_bytes)
+            .map_err(|error| format!("Could not install CLI: {error}"))?;
+        atomic_write_user_executable(&target_settings, &settings_bytes)
+            .map_err(|error| format!("Could not install Settings: {error}"))?;
+        atomic_write_user_file(&app_entry, desktop.as_bytes())
             .map_err(|error| format!("Could not create app-menu entry: {error}"))?;
     }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::fs::create_dir_all(&bin_dir)
+            .map_err(|error| format!("Could not create {}: {error}", bin_dir.display()))?;
+        std::fs::copy(&current, &target_cli)
+            .map_err(|error| format!("Could not install CLI: {error}"))?;
+        std::fs::copy(&settings, &target_settings)
+            .map_err(|error| format!("Could not install Settings: {error}"))?;
+    }
+
     println!("Crosshair installed to {}.", bin_dir.display());
     println!(
         "No autostart or system-tray process was installed. Settings and overlay are started on demand."
     );
-    let _ = paths;
     Ok(())
 }
 
 fn uninstall() -> Result<(), String> {
     let paths = AppPaths::discover().map_err(|error| error.to_string())?;
     let _ = send_command(&paths, "quit", None);
-    #[cfg(target_os = "linux")]
-    let bin_dir = {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_default();
-        std::env::var_os("XDG_BIN_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .unwrap_or_else(|| home.join(".local/bin"))
-    };
-    #[cfg(target_os = "windows")]
-    let bin_dir = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_default()
-        .join("Programs/Crosshair");
-    let _ = std::fs::remove_file(bin_dir.join(if cfg!(windows) {
-        "crosshair.exe"
-    } else {
-        "crosshair"
-    }));
-    let _ = std::fs::remove_file(bin_dir.join(if cfg!(windows) {
-        "crosshair-settings.exe"
-    } else {
-        "crosshair-settings"
-    }));
+    let bin_dir = install_bin_dir()?;
+
     #[cfg(target_os = "linux")]
     {
-        let applications = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .unwrap_or_else(|| {
-                std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_default()
-                    .join(".local/share")
-            })
-            .join("applications");
-        let _ = std::fs::remove_file(applications.join("crosshair.desktop"));
+        let cli = bin_dir.join("crosshair");
+        let settings = bin_dir.join("crosshair-settings");
+        let autostart = autostart_entry_path()?;
+        let app_entry = applications_entry_path()?;
+        remove_user_files(&[&cli, &settings, &autostart, &app_entry])
+            .map_err(|error| format!("Could not safely uninstall Crosshair: {error}"))?;
     }
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::fs::remove_file(bin_dir.join("crosshair.exe"));
+        let _ = std::fs::remove_file(bin_dir.join("crosshair-settings.exe"));
+    }
+
     println!("Crosshair executables and app-menu entry removed. Your configuration was retained.");
     Ok(())
 }
@@ -361,6 +493,26 @@ fn run() -> Result<(), String> {
     }
     if args.iter().any(|a| a == "--install") {
         return install();
+    }
+    if args.iter().any(|a| a == "--autostart") {
+        #[cfg(target_os = "linux")]
+        {
+            return install_autostart();
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            return Err("Login autostart is not implemented for this platform yet.".into());
+        }
+    }
+    if args.iter().any(|a| a == "--remove-autostart") {
+        #[cfg(target_os = "linux")]
+        {
+            return remove_autostart();
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            return Err("Login autostart is not implemented for this platform yet.".into());
+        }
     }
     if args.iter().any(|a| a == "--uninstall") {
         return uninstall();

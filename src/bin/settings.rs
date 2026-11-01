@@ -364,6 +364,38 @@ fn notify_overlay(config: &Config, paths: &AppPaths) -> Result<(), String> {
     Err("Windows named-pipe control is not yet enabled in this build".into())
 }
 
+fn run_cli_action(action: &str) -> Result<String, String> {
+    let current = std::env::current_exe().map_err(|error| error.to_string())?;
+    let name = if cfg!(windows) {
+        "crosshair.exe"
+    } else {
+        "crosshair"
+    };
+    let executable = current.parent().unwrap_or(Path::new(".")).join(name);
+    if !executable.is_file() {
+        return Err(format!(
+            "Crosshair CLI was not found beside Settings: {}",
+            executable.display()
+        ));
+    }
+    let output = Command::new(&executable)
+        .arg(action)
+        .output()
+        .map_err(|error| format!("Could not run {action}: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !output.status.success() {
+        return Err(if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("{action} failed with {}", output.status)
+        });
+    }
+    Ok(if !stdout.is_empty() { stdout } else { stderr })
+}
+
 #[cfg(unix)]
 fn start_overlay(paths: &AppPaths, show: bool) -> Result<(), String> {
     let current = std::env::current_exe().map_err(|error| error.to_string())?;
@@ -669,9 +701,12 @@ fn run() -> Result<(), String> {
         let weak = weak.clone();
         ui.on_install_autostart(move || {
             if let Some(ui) = weak.upgrade() {
-                ui.set_profile_feedback(SharedString::from(
-                    "Autostart installation is being added to the installer workflow.",
-                ));
+                match run_cli_action("--autostart") {
+                    Ok(_) => ui.set_system_feedback(SharedString::from("Login startup enabled")),
+                    Err(error) => ui.set_system_feedback(SharedString::from(format!(
+                        "Autostart failed: {error}"
+                    ))),
+                }
             }
         });
     }
@@ -680,9 +715,12 @@ fn run() -> Result<(), String> {
         let weak = weak.clone();
         ui.on_remove_autostart(move || {
             if let Some(ui) = weak.upgrade() {
-                ui.set_profile_feedback(SharedString::from(
-                    "No autostart entry is installed by default.",
-                ));
+                match run_cli_action("--remove-autostart") {
+                    Ok(_) => ui.set_system_feedback(SharedString::from("Login startup is off")),
+                    Err(error) => ui.set_system_feedback(SharedString::from(format!(
+                        "Autostart removal failed: {error}"
+                    ))),
+                }
             }
         });
     }
@@ -691,9 +729,20 @@ fn run() -> Result<(), String> {
         let weak = weak.clone();
         ui.on_uninstall_app(move || {
             if let Some(ui) = weak.upgrade() {
-                ui.set_profile_feedback(SharedString::from(
-                    "Use crosshair --uninstall to remove both native executables. Your settings are retained.",
-                ));
+                match run_cli_action("--uninstall") {
+                    Ok(_) => {
+                        ui.set_active_tab(0);
+                        ui.set_system_feedback(SharedString::from(
+                            "Crosshair uninstalled. Your settings were retained.",
+                        ));
+                    }
+                    Err(error) => {
+                        ui.set_active_tab(0);
+                        ui.set_system_feedback(SharedString::from(format!(
+                            "Uninstall failed: {error}"
+                        )));
+                    }
+                }
             }
         });
     }
