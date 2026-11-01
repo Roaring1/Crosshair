@@ -3,7 +3,7 @@
 ## Unreleased — 31/10/2026
 
 - **Hardened:** the daemon lock opens nonblocking with `O_NOFOLLOW` and accepts only regular files; FIFO and device-node paths are rejected before flock or file mutation. Lock descriptors are closed on every validation failure.
-- **Fixed dependency advisory:** the hosted Python 3.10 dependency audit identified 17 advisories affecting transitive `filelock==4.1.0`; development requirements now constrain `filelock==4.2.1`, the fix version reported by the advisory database.
+- **Fixed dependency advisory:** the hosted Python 3.10 resolver identified 17 advisories affecting transitive `filelock==4.1.0`. The audit requirements now pin fixed `filelock==4.2.1`; because that patched release requires Python 3.11+, dependency auditing runs in a dedicated Python 3.14 job while the test/lint/Bandit matrix continues to include Python 3.10.
 - **Hardened:** daemon shutdown removes only the exact socket it created, matching device, inode and socket type. A replacement file at the socket path is retained.
 - **Added:** a FIFO lock-path regression test verifies this rejection does not block daemon startup.
 
@@ -24,7 +24,7 @@
 - **Hardened:** installed POSIX launchers quote both the interpreter and script path with shell-safe argument quoting. Desktop `Exec` paths now escape quotes, backslashes, dollar signs, backticks and literal field-code percent signs, and reject control characters and unsupported executable paths.
 - **Hardened:** local IPC fails closed when peer credentials cannot be verified.
 - **Added:** exploit-oriented tests cover symlink reads (including dangling links), non-regular config files, atomic-write symlink swaps, desktop field-code escaping, shell injection through hostile install paths and missing peer credentials.
-- **Added:** Bandit medium/high severity analysis and `pip-audit` dependency vulnerability scanning to CI, pinned development tool versions, immutable GitHub Actions references, and weekly Dependabot updates. The current pinned development dependencies audit with no known vulnerabilities.
+- **Added:** Bandit medium/high severity analysis and `pip-audit` dependency vulnerability scanning to CI, pinned development tool versions, immutable GitHub Actions references, and weekly Dependabot updates. The complete pinned audit requirements report no known vulnerabilities.
 
 - **Fixed:** legacy `purplecrosshair` config migration now creates or verifies
   the destination config directory with mode 0700 before writing the mode-0600

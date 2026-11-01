@@ -561,6 +561,55 @@ def test_ipc_shutdown_does_not_unlink_replacement_file(tmp_path):
     assert app.socket_file.read_text(encoding="utf-8") == "replacement must survive"
 
 
+def test_ipc_rejects_unverifiable_peer_credentials_without_dispatch(
+    tmp_path, monkeypatch
+):
+    app = paths(tmp_path)
+    handled = []
+    server = core.IpcServer(
+        app,
+        lambda request: handled.append(request) or {"ok": True},
+        core.setup_logging(app),
+    )
+    responses = []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def settimeout(self, _timeout):
+            return None
+
+        def recv(self, _size):
+            raise AssertionError("unauthenticated IPC payload must not be parsed")
+
+        def sendall(self, payload):
+            responses.append(core.decode_object(payload.rstrip(bytes([10]))))
+
+    connection = FakeConnection()
+
+    class FakeListener:
+        def accept(self):
+            server.stop_event.set()
+            return connection, None
+
+    server.sock = FakeListener()
+    monkeypatch.setattr(core, "peer_uid", lambda _connection: None)
+
+    server._serve()
+
+    assert responses == [
+        {
+            "ok": False,
+            "message": "Peer credential verification is unavailable",
+        }
+    ]
+    assert handled == []
+
+
 def test_ipc_rejects_different_peer_uid_and_remains_available(tmp_path, monkeypatch):
     app = paths(tmp_path)
     server = core.IpcServer(app, lambda _request: {"ok": True}, core.setup_logging(app))
@@ -571,13 +620,6 @@ def test_ipc_rejects_different_peer_uid_and_remains_available(tmp_path, monkeypa
             rejected = core.ipc_call(app, {"cmd": "status"})
         assert rejected == {"ok": False, "message": "Rejected peer uid -1"}
 
-        with monkeypatch.context() as patch:
-            patch.setattr(core, "peer_uid", lambda _connection: None)
-            unverifiable = core.ipc_call(app, {"cmd": "status"})
-        assert unverifiable == {
-            "ok": False,
-            "message": "Peer credential verification is unavailable",
-        }
         assert core.ipc_call(app, {"cmd": "status"}) == {"ok": True}
     finally:
         server.stop()

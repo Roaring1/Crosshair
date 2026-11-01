@@ -170,12 +170,19 @@ python3 -m venv .venv
 python -m pip install --requirement requirements-dev.txt
 ruff check .
 bandit -q -r crosshair.py crosshair_core.py -ll
-pip-audit -r requirements-dev.txt
 python -m compileall -q crosshair.py crosshair_core.py tests
 python -m pytest -q
 ```
 
-GitHub Actions runs the pinned lint, medium/high Bandit security scan, compile, and test checks on Python 3.10–3.14. Dependabot checks the pinned action and development-tool versions weekly.
+The dependency audit uses a separate Python 3.14 environment because the patched `filelock==4.2.1` release requires Python 3.11 or newer:
+
+```bash
+python3.14 -m venv .audit-venv
+.audit-venv/bin/python -m pip install --requirement requirements-audit.txt
+.audit-venv/bin/pip-audit -r requirements-audit.txt
+```
+
+GitHub Actions runs the pinned lint, medium/high Bandit security scan, compile, and test checks on Python 3.10–3.14, then runs the dependency audit in a separate Python 3.14 job. This avoids installing a vulnerable older `filelock` into the Python 3.10 test environment. Dependabot checks the pinned actions and development/audit dependencies weekly.
 
 `crosshair_core.py` is a GTK-free module (paths, atomic config I/O,
 the single-instance lock, IPC protocol, and bounded GTK-dispatch helper).
