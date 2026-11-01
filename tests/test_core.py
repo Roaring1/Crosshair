@@ -506,6 +506,63 @@ def test_restart_refuses_fifo_log_without_spawning_helper(tmp_path, monkeypatch)
     assert spawned == []
 
 
+@pytest.mark.parametrize("failure_point", ["pipe", "inheritable"])
+def test_schedule_restart_closes_descriptors_when_setup_fails(
+    tmp_path, monkeypatch, failure_point
+):
+    app = paths(tmp_path)
+    core.ensure_directory(app.state_dir)
+    opened_log_fds = []
+    pipe_fds = []
+    real_open = core.os.open
+    real_pipe = core.os.pipe
+
+    def capture_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if Path(path) == app.log_file:
+            opened_log_fds.append(fd)
+        return fd
+
+    def fail_pipe():
+        raise OSError("injected pipe setup failure")
+
+    def capture_pipe():
+        fds = real_pipe()
+        pipe_fds.extend(fds)
+        return fds
+
+    monkeypatch.setattr(core.os, "open", capture_open)
+    monkeypatch.setattr(
+        core.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("helper must not spawn after descriptor setup failure")
+        ),
+    )
+    if failure_point == "pipe":
+        monkeypatch.setattr(core.os, "pipe", fail_pipe)
+    else:
+        monkeypatch.setattr(core.os, "pipe", capture_pipe)
+        monkeypatch.setattr(
+            core.os,
+            "set_inheritable",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("injected inheritable setup failure")
+            ),
+        )
+
+    with pytest.raises(OSError):
+        core.schedule_restart(
+            Path(__file__),
+            ["--daemon", "--no-ui"],
+            app.log_file,
+        )
+
+    for fd in [*opened_log_fds, *pipe_fds]:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
 def test_recv_line_rejects_oversized_message():
     server, client = socket.socketpair()
     try:

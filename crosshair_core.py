@@ -1022,26 +1022,29 @@ def schedule_restart(script: Path, argv: list[str], log_file: Path) -> int:
         log_fd = os.open(log_file, log_flags, 0o600)
     except OSError as exc:
         raise CoreError(f"Could not safely open restart log {log_file}: {exc}") from exc
-    if not stat.S_ISREG(os.fstat(log_fd).st_mode):
-        os.close(log_fd)
-        raise CoreError(f"Refusing non-regular restart log: {log_file}")
-    os.fchmod(log_fd, 0o600)
-    read_fd, write_fd = os.pipe()
-    os.set_inheritable(read_fd, True)
-    helper = (
-        "import os,subprocess,sys\n"
-        "fd=int(sys.argv[1]); script=sys.argv[2]; args=sys.argv[3:]\n"
-        "try:\n"
-        "    while os.read(fd,4096): pass\n"
-        "finally:\n"
-        "    os.close(fd)\n"
-        "subprocess.Popen([sys.executable,script,*args],"
-        "stdin=subprocess.DEVNULL,start_new_session=True,close_fds=True)\n"
-    )
-    command = [
-        sys.executable, "-c", helper, str(read_fd), str(Path(script).resolve()), *argv
-    ]
+
+    read_fd = -1
+    write_fd = -1
     try:
+        if not stat.S_ISREG(os.fstat(log_fd).st_mode):
+            raise CoreError(f"Refusing non-regular restart log: {log_file}")
+        os.fchmod(log_fd, 0o600)
+
+        read_fd, write_fd = os.pipe()
+        os.set_inheritable(read_fd, True)
+        helper = (
+            "import os,subprocess,sys\n"
+            "fd=int(sys.argv[1]); script=sys.argv[2]; args=sys.argv[3:]\n"
+            "try:\n"
+            "    while os.read(fd,4096): pass\n"
+            "finally:\n"
+            "    os.close(fd)\n"
+            "subprocess.Popen([sys.executable,script,*args],"
+            "stdin=subprocess.DEVNULL,start_new_session=True,close_fds=True)\n"
+        )
+        command = [
+            sys.executable, "-c", helper, str(read_fd), str(Path(script).resolve()), *argv
+        ]
         subprocess.Popen(
             command,
             pass_fds=(read_fd,),
@@ -1051,14 +1054,18 @@ def schedule_restart(script: Path, argv: list[str], log_file: Path) -> int:
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-    except Exception:
         os.close(read_fd)
-        os.close(write_fd)
+        read_fd = -1
+        return write_fd
+    except BaseException:
+        for fd in (read_fd, write_fd):
+            if fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
         raise
     finally:
-        os.close(log_fd)
-    os.close(read_fd)
-    return write_fd
+        with contextlib.suppress(OSError):
+            os.close(log_fd)
 
 def release_restart_guard(write_fd: int | None) -> None:
     if write_fd is not None:

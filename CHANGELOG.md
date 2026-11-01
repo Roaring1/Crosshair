@@ -14,7 +14,7 @@
 - **Added:** regression tests cover duplicate config/IPC keys, nested duplicate keys, non-standard numeric constants, IPC encoder rejection, and deeply nested config recovery.
 
 - **Hardened:** atomic file writes now pin the parent directory with `O_NOFOLLOW`, create unpredictable `O_EXCL` temporary files, and perform rename/cleanup relative to the pinned directory descriptor. Parent-directory replacement is detected and fails closed; non-regular destinations are refused.
-- **Hardened:** log files are opened with `O_NOFOLLOW|O_NONBLOCK`, verified as regular files, and permissioned through their open descriptor. The IPC socket is created owner-only at bind time and startup refuses to delete a regular file or other non-socket entry at its pathname.
+- **Hardened:** log files, including the restart handoff log, are opened with `O_NOFOLLOW|O_NONBLOCK`, verified as regular files, and permissioned through their open descriptor. Restart setup closes all acquired log/pipe descriptors on every failure before helper spawn. The IPC socket is created owner-only at bind time and startup refuses to delete a regular file or other non-socket entry at its pathname.
 - **Hardened:** config reads are capped at 1 MiB. Oversized files remain untouched, are not copied into a second large backup, and Crosshair continues with in-memory defaults while reporting the issue.
 - **Added:** parent-directory replacement, FIFO log, non-socket IPC entry and oversized-config tests exercise these additional denial-of-service and path-redirection boundaries.
 

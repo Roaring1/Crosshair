@@ -37,7 +37,8 @@ Crosshair is a single-user Linux desktop overlay, not a network service.
 - Directory modes, lock-file modes, normal log-file modes, and delayed
   restart-helper log modes are applied through verified file descriptors.
   Lock and log opens are no-follow and nonblocking; they reject non-regular
-  files. The socket is created with owner-only
+  files. Restart setup closes every acquired descriptor if pipe setup or helper
+  spawning fails. The socket is created with owner-only
   permissions at bind time. Startup refuses to delete a non-socket entry at
   the socket path, and shutdown unlinks only the exact socket inode created
   by that daemon instance.
