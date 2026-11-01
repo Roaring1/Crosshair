@@ -5,9 +5,10 @@ mod wayland;
 #[path = "../platform/linux/x11.rs"]
 mod x11;
 
-use crosshair_core::{AppPaths, Config, APP_VERSION};
+use crosshair_core::{APP_VERSION, AppPaths, Config};
+#[cfg(unix)]
+use std::io::{BufRead, BufReader, Read, Write};
 use std::{
-    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -15,7 +16,11 @@ use std::{
 };
 
 #[cfg(unix)]
-fn send_command(paths: &AppPaths, command: &str, payload: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
+fn send_command(
+    paths: &AppPaths,
+    command: &str,
+    payload: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
     use std::os::unix::net::UnixStream;
     let mut stream = UnixStream::connect(&paths.socket_file)
         .map_err(|error| format!("Crosshair overlay is not running: {error}"))?;
@@ -30,36 +35,53 @@ fn send_command(paths: &AppPaths, command: &str, payload: Option<serde_json::Val
         return Err("Control request exceeds 64 KiB".into());
     }
     bytes.push(b'\n');
-    stream.write_all(&bytes).map_err(|error| error.to_string())?;
+    stream
+        .write_all(&bytes)
+        .map_err(|error| error.to_string())?;
     let reader = BufReader::new(stream);
     let mut response = Vec::with_capacity(512);
-    reader.take(64 * 1024).read_until(b'\n', &mut response)
+    reader
+        .take(64 * 1024)
+        .read_until(b'\n', &mut response)
         .map_err(|error| error.to_string())?;
-    let response: serde_json::Value =
-        serde_json::from_slice(&response).map_err(|error| format!("Invalid response from overlay: {error}"))?;
+    let response: serde_json::Value = serde_json::from_slice(&response)
+        .map_err(|error| format!("Invalid response from overlay: {error}"))?;
     if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
-        return Err(response.get("message").and_then(serde_json::Value::as_str)
-            .unwrap_or("Overlay rejected command").to_string());
+        return Err(response
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Overlay rejected command")
+            .to_string());
     }
     Ok(response)
 }
 
 #[cfg(not(unix))]
-fn send_command(_: &AppPaths, _: &str, _: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
+fn send_command(
+    _: &AppPaths,
+    _: &str,
+    _: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
     Err("This platform's native IPC backend is not implemented yet".into())
 }
 
 fn sibling_executable(name: &str) -> Result<PathBuf, String> {
     let current = std::env::current_exe().map_err(|error| error.to_string())?;
-    let path = current.parent().unwrap_or(Path::new(".")).join(if cfg!(windows) {
-        format!("{name}.exe")
-    } else {
-        name.to_string()
-    });
+    let path = current
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.to_string()
+        });
     if path.is_file() {
         Ok(path)
     } else {
-        Err(format!("Required Crosshair executable was not found: {}", path.display()))
+        Err(format!(
+            "Required Crosshair executable was not found: {}",
+            path.display()
+        ))
     }
 }
 
@@ -89,7 +111,9 @@ fn spawn_daemon() -> Result<(), String> {
 fn start_enabled(paths: &AppPaths) -> Result<(), String> {
     let mut config = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
     config.enabled = true;
-    config.save_atomic(&paths.config_file).map_err(|error| error.to_string())?;
+    config
+        .save_atomic(&paths.config_file)
+        .map_err(|error| error.to_string())?;
     spawn_daemon()?;
     for _ in 0..80 {
         thread::sleep(Duration::from_millis(25));
@@ -116,7 +140,14 @@ fn print_status(paths: &AppPaths) -> Result<(), String> {
     match send_command(paths, "status", None) {
         Ok(response) => {
             println!("Crosshair daemon: running");
-            println!("Overlay: {}", if response["enabled"].as_bool() == Some(true) { "enabled" } else { "disabled" });
+            println!(
+                "Overlay: {}",
+                if response["enabled"].as_bool() == Some(true) {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
             if let Some(monitors) = response["monitors"].as_array() {
                 for monitor in monitors {
                     if let Some(name) = monitor.as_str() {
@@ -127,14 +158,23 @@ fn print_status(paths: &AppPaths) -> Result<(), String> {
         }
         Err(_) => {
             println!("Crosshair daemon: not running");
-            println!("Overlay setting: {}", if config.enabled { "enabled (will show on next start)" } else { "disabled" });
+            println!(
+                "Overlay setting: {}",
+                if config.enabled {
+                    "enabled (will show on next start)"
+                } else {
+                    "disabled"
+                }
+            );
         }
     }
     Ok(())
 }
 
 fn restart_daemon(paths: &AppPaths) -> Result<(), String> {
-    let enabled = Config::load(&paths.config_file).map_err(|error| error.to_string())?.enabled;
+    let enabled = Config::load(&paths.config_file)
+        .map_err(|error| error.to_string())?
+        .enabled;
     if send_command(paths, "quit", None).is_ok() {
         for _ in 0..120 {
             if send_command(paths, "status", None).is_err() {
@@ -151,9 +191,19 @@ fn restart_daemon(paths: &AppPaths) -> Result<(), String> {
 
 fn import_profile(paths: &AppPaths, code: &str) -> Result<(), String> {
     let mut config = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
-    config.import_code(code).map_err(|error| error.to_string())?;
-    config.save_atomic(&paths.config_file).map_err(|error| error.to_string())?;
-    if send_command(paths, "set", Some(serde_json::to_value(&config).map_err(|error| error.to_string())?)).is_ok() {
+    config
+        .import_code(code)
+        .map_err(|error| error.to_string())?;
+    config
+        .save_atomic(&paths.config_file)
+        .map_err(|error| error.to_string())?;
+    if send_command(
+        paths,
+        "set",
+        Some(serde_json::to_value(&config).map_err(|error| error.to_string())?),
+    )
+    .is_ok()
+    {
         println!("Crosshair profile imported and applied.");
     } else {
         println!("Crosshair profile imported. It will be used the next time the overlay is shown.");
@@ -166,7 +216,9 @@ fn open_folder(paths: &AppPaths) -> Result<(), String> {
     let (program, argument) = ("explorer.exe", paths.config_dir.as_os_str().to_owned());
     #[cfg(target_os = "linux")]
     let (program, argument) = ("xdg-open", paths.config_dir.as_os_str().to_owned());
-    Command::new(program).arg(argument).spawn()
+    Command::new(program)
+        .arg(argument)
+        .spawn()
         .map_err(|error| format!("Could not open config folder: {error}"))?;
     Ok(())
 }
@@ -177,22 +229,37 @@ fn install() -> Result<(), String> {
     let settings = sibling_executable("crosshair-settings")?;
     #[cfg(target_os = "linux")]
     let bin_dir = {
-        let home = std::env::var_os("HOME").map(PathBuf::from)
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
             .ok_or_else(|| "HOME is not set".to_string())?;
-        std::env::var_os("XDG_BIN_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
+        std::env::var_os("XDG_BIN_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
             .unwrap_or_else(|| home.join(".local/bin"))
     };
     #[cfg(target_os = "windows")]
     let bin_dir = {
-        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+        let local = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
             .ok_or_else(|| "LOCALAPPDATA is not set".to_string())?;
         local.join("Programs/Crosshair")
     };
-    std::fs::create_dir_all(&bin_dir).map_err(|error| format!("Could not create {}: {error}", bin_dir.display()))?;
-    let target_cli = bin_dir.join(if cfg!(windows) { "crosshair.exe" } else { "crosshair" });
-    let target_settings = bin_dir.join(if cfg!(windows) { "crosshair-settings.exe" } else { "crosshair-settings" });
-    std::fs::copy(&current, &target_cli).map_err(|error| format!("Could not install CLI: {error}"))?;
-    std::fs::copy(&settings, &target_settings).map_err(|error| format!("Could not install Settings: {error}"))?;
+    std::fs::create_dir_all(&bin_dir)
+        .map_err(|error| format!("Could not create {}: {error}", bin_dir.display()))?;
+    let target_cli = bin_dir.join(if cfg!(windows) {
+        "crosshair.exe"
+    } else {
+        "crosshair"
+    });
+    let target_settings = bin_dir.join(if cfg!(windows) {
+        "crosshair-settings.exe"
+    } else {
+        "crosshair-settings"
+    });
+    std::fs::copy(&current, &target_cli)
+        .map_err(|error| format!("Could not install CLI: {error}"))?;
+    std::fs::copy(&settings, &target_settings)
+        .map_err(|error| format!("Could not install Settings: {error}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -201,10 +268,16 @@ fn install() -> Result<(), String> {
     }
     #[cfg(target_os = "linux")]
     {
-        let applications = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from)
-            .filter(|p| p.is_absolute()).unwrap_or_else(|| {
-                std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(".local/share")
-            }).join("applications");
+        let applications = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_default()
+                    .join(".local/share")
+            })
+            .join("applications");
         std::fs::create_dir_all(&applications).map_err(|error| error.to_string())?;
         let desktop = format!(
             "[Desktop Entry]\nType=Application\nName=Crosshair\nComment=Configure the Crosshair overlay\nExec={} --config\nTerminal=false\nCategories=Utility;\nStartupWMClass=crosshair\n",
@@ -214,7 +287,9 @@ fn install() -> Result<(), String> {
             .map_err(|error| format!("Could not create app-menu entry: {error}"))?;
     }
     println!("Crosshair installed to {}.", bin_dir.display());
-    println!("No autostart or system-tray process was installed. Settings and overlay are started on demand.");
+    println!(
+        "No autostart or system-tray process was installed. Settings and overlay are started on demand."
+    );
     let _ = paths;
     Ok(())
 }
@@ -224,21 +299,41 @@ fn uninstall() -> Result<(), String> {
     let _ = send_command(&paths, "quit", None);
     #[cfg(target_os = "linux")]
     let bin_dir = {
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-        std::env::var_os("XDG_BIN_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        std::env::var_os("XDG_BIN_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
             .unwrap_or_else(|| home.join(".local/bin"))
     };
     #[cfg(target_os = "windows")]
-    let bin_dir = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
-        .unwrap_or_default().join("Programs/Crosshair");
-    let _ = std::fs::remove_file(bin_dir.join(if cfg!(windows) { "crosshair.exe" } else { "crosshair" }));
-    let _ = std::fs::remove_file(bin_dir.join(if cfg!(windows) { "crosshair-settings.exe" } else { "crosshair-settings" }));
+    let bin_dir = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+        .join("Programs/Crosshair");
+    let _ = std::fs::remove_file(bin_dir.join(if cfg!(windows) {
+        "crosshair.exe"
+    } else {
+        "crosshair"
+    }));
+    let _ = std::fs::remove_file(bin_dir.join(if cfg!(windows) {
+        "crosshair-settings.exe"
+    } else {
+        "crosshair-settings"
+    }));
     #[cfg(target_os = "linux")]
     {
-        let applications = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from)
-            .filter(|p| p.is_absolute()).unwrap_or_else(|| {
-                std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(".local/share")
-            }).join("applications");
+        let applications = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_default()
+                    .join(".local/share")
+            })
+            .join("applications");
         let _ = std::fs::remove_file(applications.join("crosshair.desktop"));
     }
     println!("Crosshair executables and app-menu entry removed. Your configuration was retained.");
@@ -258,7 +353,10 @@ fn run() -> Result<(), String> {
     }
     if args.iter().any(|a| a == "--export-code") {
         let config = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
-        println!("{}", config.export_code().map_err(|error| error.to_string())?);
+        println!(
+            "{}",
+            config.export_code().map_err(|error| error.to_string())?
+        );
         return Ok(());
     }
     if args.iter().any(|a| a == "--install") {
@@ -268,7 +366,9 @@ fn run() -> Result<(), String> {
         return uninstall();
     }
     if let Some(index) = args.iter().position(|a| a == "--import-code") {
-        let code = args.get(index + 1).ok_or_else(|| "--import-code requires a profile code".to_string())?;
+        let code = args
+            .get(index + 1)
+            .ok_or_else(|| "--import-code requires a profile code".to_string())?;
         return import_profile(&paths, code);
     }
     if args.iter().any(|a| a == "--list-monitors") {
@@ -281,7 +381,10 @@ fn run() -> Result<(), String> {
             } else {
                 return Err("No Wayland or X11 display session was detected.".into());
             };
-            println!("{}", serde_json::to_string(&monitors).map_err(|error| error.to_string())?);
+            println!(
+                "{}",
+                serde_json::to_string(&monitors).map_err(|error| error.to_string())?
+            );
             return Ok(());
         }
         #[cfg(not(target_os = "linux"))]
@@ -293,7 +396,9 @@ fn run() -> Result<(), String> {
         let mut config = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
         if args.iter().any(|a| a == "--show") {
             config.enabled = true;
-            config.save_atomic(&paths.config_file).map_err(|error| error.to_string())?;
+            config
+                .save_atomic(&paths.config_file)
+                .map_err(|error| error.to_string())?;
         }
         if !config.enabled {
             return Ok(());
@@ -310,7 +415,7 @@ fn run() -> Result<(), String> {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            Err("This platform's overlay backend is not built yet.".into())
+            return Err("This platform's overlay backend is not built yet.".into());
         }
     }
     if args.iter().any(|a| a == "--status") {
@@ -326,7 +431,9 @@ fn run() -> Result<(), String> {
         if send_command(&paths, "hide", None).is_err() {
             let mut config = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
             config.enabled = false;
-            config.save_atomic(&paths.config_file).map_err(|error| error.to_string())?;
+            config
+                .save_atomic(&paths.config_file)
+                .map_err(|error| error.to_string())?;
         }
         return Ok(());
     }
@@ -346,9 +453,18 @@ fn run() -> Result<(), String> {
     if args.iter().any(|a| a == "--doctor") {
         println!("Crosshair {APP_VERSION}");
         println!("OS: {}", std::env::consts::OS);
-        println!("Session: {}", std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unknown".into()));
-        println!("Wayland: {}", std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "not active".into()));
-        println!("X11: {}", std::env::var("DISPLAY").unwrap_or_else(|_| "not active".into()));
+        println!(
+            "Session: {}",
+            std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unknown".into())
+        );
+        println!(
+            "Wayland: {}",
+            std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "not active".into())
+        );
+        println!(
+            "X11: {}",
+            std::env::var("DISPLAY").unwrap_or_else(|_| "not active".into())
+        );
         print_status(&paths)?;
         return Ok(());
     }
@@ -356,8 +472,11 @@ fn run() -> Result<(), String> {
         return open_folder(&paths);
     }
     if let Some(index) = args.iter().position(|a| a == "--set") {
-        let json = args.get(index + 1).ok_or_else(|| "--set requires a JSON argument".to_string())?;
-        let patch: serde_json::Value = serde_json::from_str(json).map_err(|error| error.to_string())?;
+        let json = args
+            .get(index + 1)
+            .ok_or_else(|| "--set requires a JSON argument".to_string())?;
+        let patch: serde_json::Value =
+            serde_json::from_str(json).map_err(|error| error.to_string())?;
         let mut config = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
         if let Some(object) = patch.as_object() {
             let mut base = serde_json::to_value(&config).map_err(|error| error.to_string())?;
@@ -370,8 +489,14 @@ fn run() -> Result<(), String> {
         } else {
             return Err("--set expects a JSON object".into());
         }
-        config.save_atomic(&paths.config_file).map_err(|error| error.to_string())?;
-        let _ = send_command(&paths, "set", Some(serde_json::to_value(&config).map_err(|error| error.to_string())?));
+        config
+            .save_atomic(&paths.config_file)
+            .map_err(|error| error.to_string())?;
+        let _ = send_command(
+            &paths,
+            "set",
+            Some(serde_json::to_value(&config).map_err(|error| error.to_string())?),
+        );
         return Ok(());
     }
     Err("Unknown command. Run crosshair --doctor or open Settings.".into())

@@ -1,10 +1,14 @@
-use crosshair_core::render::{render_crosshair, Raster};
+use crosshair_core::render::{Raster, render_crosshair};
 use crosshair_core::{AppPaths, Config, MonitorDescriptor};
-use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, Timer, TimerMode, VecModel};
+use slint::{
+    ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, Timer, TimerMode,
+    VecModel,
+};
 use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::process::Command;
 use std::rc::Rc;
+#[cfg(unix)]
 use std::thread;
 use std::time::Duration;
 
@@ -39,7 +43,11 @@ fn slint_color(hex: &str) -> slint::Color {
 fn monitor_descriptor_label(monitor: &MonitorDescriptor, all: &[MonitorDescriptor]) -> String {
     let duplicates = all.iter().filter(|item| item.name == monitor.name).count();
     if duplicates > 1 {
-        format!("Monitor: {} ({})", monitor.name, monitor.ordinal.saturating_add(1))
+        format!(
+            "Monitor: {} ({})",
+            monitor.name,
+            monitor.ordinal.saturating_add(1)
+        )
     } else {
         format!("Monitor: {}", monitor.name)
     }
@@ -87,11 +95,14 @@ fn monitor_options(config: &Config, monitors: &[MonitorDescriptor]) -> Vec<Strin
 
 fn discover_monitors() -> Vec<MonitorDescriptor> {
     let executable = match std::env::current_exe() {
-        Ok(path) => path.parent().unwrap_or(Path::new(".")).join(if cfg!(windows) {
-            "crosshair.exe"
-        } else {
-            "crosshair"
-        }),
+        Ok(path) => path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(if cfg!(windows) {
+                "crosshair.exe"
+            } else {
+                "crosshair"
+            }),
         Err(_) => return Vec::new(),
     };
     let output = match Command::new(executable).arg("--list-monitors").output() {
@@ -101,7 +112,11 @@ fn discover_monitors() -> Vec<MonitorDescriptor> {
     serde_json::from_slice(&output.stdout).unwrap_or_default()
 }
 
-fn read_ui(ui: &SettingsWindow, current: &Config, monitors: &[MonitorDescriptor]) -> Result<Config, String> {
+fn read_ui(
+    ui: &SettingsWindow,
+    current: &Config,
+    monitors: &[MonitorDescriptor],
+) -> Result<Config, String> {
     let mut next = current.clone();
     next.enabled = ui.get_enabled();
     next.auto_save = ui.get_auto_save();
@@ -124,10 +139,8 @@ fn read_ui(ui: &SettingsWindow, current: &Config, monitors: &[MonitorDescriptor]
     next.shadow.offset_y = ui.get_shadow_y().clamp(-200, 200) as i16;
 
     next.reference_dot.enabled = ui.get_reference_enabled();
-    next.reference_dot.color = canonical_color(
-        &ui.get_reference_color_text(),
-        &current.reference_dot.color,
-    );
+    next.reference_dot.color =
+        canonical_color(&ui.get_reference_color_text(), &current.reference_dot.color);
     next.reference_dot.opacity = ui.get_reference_opacity();
     next.reference_dot.size = ui.get_reference_size().clamp(1, 100) as u16;
     next.reference_dot.offset_x = ui.get_reference_x().clamp(-500, 500) as i16;
@@ -135,10 +148,7 @@ fn read_ui(ui: &SettingsWindow, current: &Config, monitors: &[MonitorDescriptor]
 
     next.offset_x = ui.get_offset_x().clamp(-500, 500) as i16;
     next.offset_y = ui.get_offset_y().clamp(-500, 500) as i16;
-    next.preview_bg = canonical_color(
-        &ui.get_preview_background_text(),
-        &current.preview_bg,
-    );
+    next.preview_bg = canonical_color(&ui.get_preview_background_text(), &current.preview_bg);
 
     let selection = ui.get_monitor_selection().to_string();
     match selection.as_str() {
@@ -150,15 +160,14 @@ fn read_ui(ui: &SettingsWindow, current: &Config, monitors: &[MonitorDescriptor]
             next.monitor_name_ordinal = 0;
         }
         label if label.starts_with("Monitor: ") => {
-            if let Some(monitor) = monitors.iter()
+            if let Some(monitor) = monitors
+                .iter()
                 .find(|monitor| monitor_descriptor_label(monitor, monitors) == label)
             {
                 next.monitor_mode = "name".into();
                 next.monitor_name = monitor.name.clone();
                 next.monitor_name_ordinal = monitor.ordinal;
-            } else if current.monitor_mode == "name"
-                && monitor_label(current, monitors) == label
-            {
+            } else if current.monitor_mode == "name" && monitor_label(current, monitors) == label {
                 // Preserve a saved selection that is currently disconnected.
                 next.monitor_mode = "name".into();
                 next.monitor_name = current.monitor_name.clone();
@@ -274,8 +283,10 @@ fn composite_raster(destination: &mut [u8], destination_size: u32, raster: &Rast
             let a = raster.bgra_premultiplied[src + 3] as u32;
             let remain = 255 - a;
             destination[dst] = (r + (destination[dst] as u32 * remain + 127) / 255).min(255) as u8;
-            destination[dst + 1] = (g + (destination[dst + 1] as u32 * remain + 127) / 255).min(255) as u8;
-            destination[dst + 2] = (b + (destination[dst + 2] as u32 * remain + 127) / 255).min(255) as u8;
+            destination[dst + 1] =
+                (g + (destination[dst + 1] as u32 * remain + 127) / 255).min(255) as u8;
+            destination[dst + 2] =
+                (b + (destination[dst + 2] as u32 * remain + 127) / 255).min(255) as u8;
             destination[dst + 3] = 255;
         }
     }
@@ -306,9 +317,13 @@ fn notify_overlay(config: &Config, paths: &AppPaths) -> Result<(), String> {
     }
     let mut stream = match connected {
         Ok(stream) => stream,
-        Err(error) if !config.enabled
-            && (error.kind() == std::io::ErrorKind::NotFound
-                || error.kind() == std::io::ErrorKind::ConnectionRefused) => return Ok(()),
+        Err(error)
+            if !config.enabled
+                && (error.kind() == std::io::ErrorKind::NotFound
+                    || error.kind() == std::io::ErrorKind::ConnectionRefused) =>
+        {
+            return Ok(());
+        }
         Err(error) => return Err(format!("Could not contact overlay: {error}")),
     };
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
@@ -322,7 +337,9 @@ fn notify_overlay(config: &Config, paths: &AppPaths) -> Result<(), String> {
         return Err("Settings update exceeds the IPC message limit".into());
     }
     encoded.push(b'\n');
-    stream.write_all(&encoded).map_err(|error| error.to_string())?;
+    stream
+        .write_all(&encoded)
+        .map_err(|error| error.to_string())?;
     let reader = BufReader::new(stream);
     let mut line = Vec::with_capacity(256);
     reader
@@ -347,15 +364,20 @@ fn notify_overlay(config: &Config, paths: &AppPaths) -> Result<(), String> {
     Err("Windows named-pipe control is not yet enabled in this build".into())
 }
 
+#[cfg(unix)]
 fn start_overlay(paths: &AppPaths, show: bool) -> Result<(), String> {
     let current = std::env::current_exe().map_err(|error| error.to_string())?;
-    let name = if cfg!(windows) { "crosshair.exe" } else { "crosshair" };
-    let executable = current
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join(name);
+    let name = if cfg!(windows) {
+        "crosshair.exe"
+    } else {
+        "crosshair"
+    };
+    let executable = current.parent().unwrap_or(Path::new(".")).join(name);
     if !executable.is_file() {
-        return Err(format!("Overlay executable was not found beside Settings: {}", executable.display()));
+        return Err(format!(
+            "Overlay executable was not found beside Settings: {}",
+            executable.display()
+        ));
     }
     let mut command = Command::new(executable);
     if show {
@@ -392,7 +414,9 @@ fn open_config_directory(paths: &AppPaths) -> Result<(), String> {
         c.arg(&paths.config_dir);
         c
     };
-    command.spawn().map_err(|error| format!("Could not open config folder: {error}"))?;
+    command
+        .spawn()
+        .map_err(|error| format!("Could not open config folder: {error}"))?;
     Ok(())
 }
 
@@ -460,10 +484,13 @@ fn run() -> Result<(), String> {
                 move || {
                     let Some(ui) = weak.upgrade() else { return };
                     let old = config.borrow().clone();
-                    let Ok(candidate) = read_ui(&ui, &old, &monitors.borrow()) else { return };
+                    let Ok(candidate) = read_ui(&ui, &old, &monitors.borrow()) else {
+                        return;
+                    };
                     let autosave_before = last_auto_save.get();
                     last_auto_save.set(candidate.auto_save);
-                    let should_persist = candidate.auto_save || (autosave_before && !candidate.auto_save);
+                    let should_persist =
+                        candidate.auto_save || (autosave_before && !candidate.auto_save);
                     update_preview(&ui, &candidate);
                     if let Err(error) = notify_overlay(&candidate, &paths) {
                         ui.set_profile_feedback(SharedString::from(error));
@@ -471,7 +498,9 @@ fn run() -> Result<(), String> {
                     }
                     if should_persist {
                         if let Err(error) = candidate.save_atomic(&paths.config_file) {
-                            ui.set_profile_feedback(SharedString::from(format!("Save failed: {error}")));
+                            ui.set_profile_feedback(SharedString::from(format!(
+                                "Save failed: {error}"
+                            )));
                         }
                     }
                     *config.borrow_mut() = candidate;
@@ -495,7 +524,9 @@ fn run() -> Result<(), String> {
                         return;
                     }
                     if let Err(error) = candidate.save_atomic(&paths.config_file) {
-                        ui.set_profile_feedback(SharedString::from(format!("Save failed: {error}")));
+                        ui.set_profile_feedback(SharedString::from(format!(
+                            "Save failed: {error}"
+                        )));
                         return;
                     }
                     *config.borrow_mut() = candidate.clone();
@@ -516,7 +547,15 @@ fn run() -> Result<(), String> {
         ui.on_reset_requested(move || {
             let Some(ui) = weak.upgrade() else { return };
             let candidate = Config::default();
-            match apply_candidate(&ui, &config, &paths, candidate.clone(), true, Some("Defaults restored"), &monitors.borrow()) {
+            match apply_candidate(
+                &ui,
+                &config,
+                &paths,
+                candidate.clone(),
+                true,
+                Some("Defaults restored"),
+                &monitors.borrow(),
+            ) {
                 Ok(()) => last_auto_save.set(candidate.auto_save),
                 Err(error) => eprintln!("Reset failed: {error}"),
             }
@@ -540,7 +579,9 @@ fn run() -> Result<(), String> {
             match candidate.export_code() {
                 Ok(code) => {
                     ui.set_profile_code(SharedString::from(code));
-                    ui.set_profile_feedback(SharedString::from("Copy this code to share the crosshair"));
+                    ui.set_profile_feedback(SharedString::from(
+                        "Copy this code to share the crosshair",
+                    ));
                 }
                 Err(error) => ui.set_profile_feedback(SharedString::from(error.to_string())),
             }
@@ -559,7 +600,15 @@ fn run() -> Result<(), String> {
             let mut candidate = config.borrow().clone();
             match candidate.import_code(&code) {
                 Ok(()) => {
-                    match apply_candidate(&ui, &config, &paths, candidate.clone(), true, Some("Crosshair imported"), &monitors.borrow()) {
+                    match apply_candidate(
+                        &ui,
+                        &config,
+                        &paths,
+                        candidate.clone(),
+                        true,
+                        Some("Crosshair imported"),
+                        &monitors.borrow(),
+                    ) {
                         Ok(()) => last_auto_save.set(candidate.auto_save),
                         Err(error) => eprintln!("Import apply failed: {error}"),
                     }
@@ -609,7 +658,9 @@ fn run() -> Result<(), String> {
                         ui.set_profile_feedback(SharedString::from("Reloaded"));
                     }
                 }
-                Err(error) => ui.set_profile_feedback(SharedString::from(format!("Reload failed: {error}"))),
+                Err(error) => {
+                    ui.set_profile_feedback(SharedString::from(format!("Reload failed: {error}")))
+                }
             }
         });
     }

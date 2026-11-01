@@ -110,7 +110,12 @@ impl Default for Config {
 
 impl Default for Outline {
     fn default() -> Self {
-        Self { enabled: true, color: "#000000".into(), opacity: 0.80, thickness: 1 }
+        Self {
+            enabled: true,
+            color: "#000000".into(),
+            opacity: 0.80,
+            thickness: 1,
+        }
     }
 }
 
@@ -157,8 +162,15 @@ impl Config {
 
     pub fn normalize(&mut self) {
         const SHAPES: &[&str] = &[
-            "dot", "cross", "x", "plus", "ring", "circle",
-            "dot_ring", "cross_dot", "x_dot",
+            "dot",
+            "cross",
+            "x",
+            "plus",
+            "ring",
+            "circle",
+            "dot_ring",
+            "cross_dot",
+            "x_dot",
         ];
         if !SHAPES.contains(&self.shape.as_str()) {
             self.shape = "dot".into();
@@ -214,7 +226,8 @@ impl Config {
     pub fn export_code(&self) -> Result<String, CoreError> {
         let mut c = self.clone();
         c.normalize();
-        let shape = shape_index(&c.shape).ok_or_else(|| CoreError::Config("unknown shape".into()))?;
+        let shape =
+            shape_index(&c.shape).ok_or_else(|| CoreError::Config("unknown shape".into()))?;
         let mut data = Vec::with_capacity(PROFILE_BYTES);
         let flags = shape
             | ((c.outline.enabled as u8) << 4)
@@ -241,7 +254,9 @@ impl Config {
         put_i16(&mut data, c.reference_dot.offset_x);
         put_i16(&mut data, c.reference_dot.offset_y);
         if data.len() != PROFILE_BYTES - 2 {
-            return Err(CoreError::Profile("internal profile layout mismatch".into()));
+            return Err(CoreError::Profile(
+                "internal profile layout mismatch".into(),
+            ));
         }
         let crc = crc16_ccitt(&data);
         data.extend(crc.to_le_bytes());
@@ -260,30 +275,45 @@ impl Config {
         }
         let stored_crc = u16::from_le_bytes([bytes[34], bytes[35]]);
         if crc16_ccitt(&bytes[..34]) != stored_crc {
-            return Err(CoreError::Profile("code check failed; verify the copied characters".into()));
+            return Err(CoreError::Profile(
+                "code check failed; verify the copied characters".into(),
+            ));
         }
 
         let flags = bytes[0];
         let shape = index_shape(flags & 0x0f)
             .ok_or_else(|| CoreError::Profile("unsupported crosshair shape".into()))?;
         let mut p = 1;
-        let size = bytes[p] as u16; p += 1;
-        let thickness = bytes[p] as u16; p += 1;
-        let gap = bytes[p] as u16; p += 1;
-        let opacity = byte_to_float(bytes[p]); p += 1;
-        let color = rgb_to_color(&bytes[p..p + 3]); p += 3;
-        let outline_thickness = bytes[p] as u16; p += 1;
-        let outline_opacity = byte_to_float(bytes[p]); p += 1;
-        let outline_color = rgb_to_color(&bytes[p..p + 3]); p += 3;
-        let shadow_opacity = byte_to_float(bytes[p]); p += 1;
-        let shadow_color = rgb_to_color(&bytes[p..p + 3]); p += 3;
+        let size = bytes[p] as u16;
+        p += 1;
+        let thickness = bytes[p] as u16;
+        p += 1;
+        let gap = bytes[p] as u16;
+        p += 1;
+        let opacity = byte_to_float(bytes[p]);
+        p += 1;
+        let color = rgb_to_color(&bytes[p..p + 3]);
+        p += 3;
+        let outline_thickness = bytes[p] as u16;
+        p += 1;
+        let outline_opacity = byte_to_float(bytes[p]);
+        p += 1;
+        let outline_color = rgb_to_color(&bytes[p..p + 3]);
+        p += 3;
+        let shadow_opacity = byte_to_float(bytes[p]);
+        p += 1;
+        let shadow_color = rgb_to_color(&bytes[p..p + 3]);
+        p += 3;
         let shadow_x = get_i16(&bytes, &mut p);
         let shadow_y = get_i16(&bytes, &mut p);
         let offset_x = get_i16(&bytes, &mut p);
         let offset_y = get_i16(&bytes, &mut p);
-        let reference_size = bytes[p] as u16; p += 1;
-        let reference_opacity = byte_to_float(bytes[p]); p += 1;
-        let reference_color = rgb_to_color(&bytes[p..p + 3]); p += 3;
+        let reference_size = bytes[p] as u16;
+        p += 1;
+        let reference_opacity = byte_to_float(bytes[p]);
+        p += 1;
+        let reference_color = rgb_to_color(&bytes[p..p + 3]);
+        p += 3;
         let reference_x = get_i16(&bytes, &mut p);
         let reference_y = get_i16(&bytes, &mut p);
         if p != 34 {
@@ -356,21 +386,47 @@ impl AppPaths {
         let home = home_dir()?;
         #[cfg(target_os = "windows")]
         let (config_home, data_home, state_home) = {
-            let roaming = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| home.join("AppData/Roaming"));
-            let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| home.join("AppData/Local"));
-            (roaming.join("Crosshair"), local.join("Crosshair"), local.join("Crosshair"))
+            let roaming = std::env::var_os("APPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join("AppData/Roaming"));
+            let local = std::env::var_os("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join("AppData/Local"));
+            (
+                roaming.join("Crosshair"),
+                local.join("Crosshair"),
+                local.join("Crosshair"),
+            )
         };
         #[cfg(not(target_os = "windows"))]
         let (config_home, data_home, state_home) = {
-            let config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home.join(".config"));
-            let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home.join(".local/share"));
-            let state = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home.join(".local/state"));
+            let config = std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .unwrap_or_else(|| home.join(".config"));
+            let data = std::env::var_os("XDG_DATA_HOME")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .unwrap_or_else(|| home.join(".local/share"));
+            let state = std::env::var_os("XDG_STATE_HOME")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .unwrap_or_else(|| home.join(".local/state"));
             (config.join(APP_ID), data.join(APP_ID), state.join(APP_ID))
         };
         #[cfg(target_os = "linux")]
-        let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|p| p.is_absolute()).map(|p| p.join(APP_ID)).unwrap_or_else(|| std::env::temp_dir().join(format!("{APP_ID}-{}", unsafe { libc::getuid() })));
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .map(|p| p.join(APP_ID))
+            .unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("{APP_ID}-{}", unsafe { libc::getuid() }))
+            });
         #[cfg(target_os = "windows")]
-        let runtime = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| home.join("AppData/Local")).join("Crosshair/Runtime");
+        let runtime = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData/Local"))
+            .join("Crosshair/Runtime");
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         let runtime = std::env::temp_dir().join(APP_ID);
 
@@ -399,7 +455,11 @@ fn home_dir() -> Result<PathBuf, CoreError> {
 }
 
 fn finite_clamp(value: f32, fallback: f32, lo: f32, hi: f32) -> f32 {
-    if value.is_finite() { value.clamp(lo, hi) } else { fallback }
+    if value.is_finite() {
+        value.clamp(lo, hi)
+    } else {
+        fallback
+    }
 }
 
 fn normalize_color(value: &str, fallback: &str) -> String {
@@ -448,17 +508,30 @@ fn get_i16(bytes: &[u8], offset: &mut usize) -> i16 {
 
 fn shape_index(shape: &str) -> Option<u8> {
     match shape {
-        "dot" => Some(0), "cross" => Some(1), "x" => Some(2), "plus" => Some(3),
-        "ring" | "circle" => Some(4), "dot_ring" => Some(5), "cross_dot" => Some(6),
-        "x_dot" => Some(7), _ => None,
+        "dot" => Some(0),
+        "cross" => Some(1),
+        "x" => Some(2),
+        "plus" => Some(3),
+        "ring" | "circle" => Some(4),
+        "dot_ring" => Some(5),
+        "cross_dot" => Some(6),
+        "x_dot" => Some(7),
+        _ => None,
     }
 }
 
 fn index_shape(index: u8) -> Option<&'static str> {
     match index {
-        0 => Some("dot"), 1 => Some("cross"), 2 => Some("x"), 3 => Some("plus"),
-        4 => Some("ring"), 5 => Some("dot_ring"), 6 => Some("cross_dot"), 7 => Some("x_dot"),
-        8 => Some("circle"), _ => None,
+        0 => Some("dot"),
+        1 => Some("cross"),
+        2 => Some("x"),
+        3 => Some("plus"),
+        4 => Some("ring"),
+        5 => Some("dot_ring"),
+        6 => Some("cross_dot"),
+        7 => Some("x_dot"),
+        8 => Some("circle"),
+        _ => None,
     }
 }
 
@@ -467,7 +540,11 @@ fn crc16_ccitt(bytes: &[u8]) -> u16 {
     for byte in bytes {
         crc ^= (*byte as u16) << 8;
         for _ in 0..8 {
-            crc = if crc & 0x8000 != 0 { (crc << 1) ^ 0x1021 } else { crc << 1 };
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ 0x1021
+            } else {
+                crc << 1
+            };
         }
     }
     crc
@@ -484,8 +561,12 @@ fn base64_url_encode(bytes: &[u8]) -> String {
         let n = (a << 16) | (b << 8) | c;
         result.push(B64[((n >> 18) & 63) as usize] as char);
         result.push(B64[((n >> 12) & 63) as usize] as char);
-        if chunk.len() > 1 { result.push(B64[((n >> 6) & 63) as usize] as char); }
-        if chunk.len() > 2 { result.push(B64[(n & 63) as usize] as char); }
+        if chunk.len() > 1 {
+            result.push(B64[((n >> 6) & 63) as usize] as char);
+        }
+        if chunk.len() > 2 {
+            result.push(B64[(n & 63) as usize] as char);
+        }
     }
     result
 }
@@ -498,8 +579,11 @@ fn base64_url_decode(value: &str) -> Result<Vec<u8>, CoreError> {
     let mut accumulator = 0u32;
     let mut bits = 0u8;
     for byte in value.bytes() {
-        let digit = B64.iter().position(|candidate| *candidate == byte)
-            .ok_or_else(|| CoreError::Profile("invalid character in code".into()))? as u32;
+        let digit = B64
+            .iter()
+            .position(|candidate| *candidate == byte)
+            .ok_or_else(|| CoreError::Profile("invalid character in code".into()))?
+            as u32;
         accumulator = (accumulator << 6) | digit;
         bits += 6;
         if bits >= 8 {
@@ -514,7 +598,11 @@ fn base64_url_decode(value: &str) -> Result<Vec<u8>, CoreError> {
 }
 
 #[cfg(target_os = "linux")]
-fn open_directory_linux(path: &Path, create: bool, private_final: bool) -> Result<std::os::fd::OwnedFd, CoreError> {
+fn open_directory_linux(
+    path: &Path,
+    create: bool,
+    private_final: bool,
+) -> Result<std::os::fd::OwnedFd, CoreError> {
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
@@ -582,7 +670,8 @@ fn read_config(path: &Path) -> Result<Option<Vec<u8>>, CoreError> {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
 
-    let parent = path.parent()
+    let parent = path
+        .parent()
         .ok_or_else(|| CoreError::Config("config path has no parent".into()))?;
     let directory = match open_directory_linux(parent, false, false) {
         Ok(directory) => directory,
@@ -591,7 +680,8 @@ fn read_config(path: &Path) -> Result<Option<Vec<u8>>, CoreError> {
         }
         Err(error) => return Err(error),
     };
-    let leaf = path.file_name()
+    let leaf = path
+        .file_name()
         .ok_or_else(|| CoreError::Config("invalid config filename".into()))?;
     let leaf = CString::new(leaf.as_bytes())
         .map_err(|_| CoreError::Config("config filename contains a NUL byte".into()))?;
@@ -608,22 +698,31 @@ fn read_config(path: &Path) -> Result<Option<Vec<u8>>, CoreError> {
             return Ok(None);
         }
         if error.raw_os_error() == Some(libc::ELOOP) {
-            return Err(CoreError::Config("refusing to read a symlinked config file".into()));
+            return Err(CoreError::Config(
+                "refusing to read a symlinked config file".into(),
+            ));
         }
         return Err(error.into());
     }
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
     let metadata = file.metadata()?;
     if !metadata.is_file() {
-        return Err(CoreError::Config("config path is not a regular file".into()));
+        return Err(CoreError::Config(
+            "config path is not a regular file".into(),
+        ));
     }
     if metadata.len() > MAX_CONFIG_BYTES as u64 {
-        return Err(CoreError::Config("config exceeds 1 MiB and was left untouched".into()));
+        return Err(CoreError::Config(
+            "config exceeds 1 MiB and was left untouched".into(),
+        ));
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take((MAX_CONFIG_BYTES + 1) as u64).read_to_end(&mut bytes)?;
+    file.take((MAX_CONFIG_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
     if bytes.len() > MAX_CONFIG_BYTES {
-        return Err(CoreError::Config("config grew beyond 1 MiB while being read".into()));
+        return Err(CoreError::Config(
+            "config grew beyond 1 MiB while being read".into(),
+        ));
     }
     Ok(Some(bytes))
 }
@@ -637,21 +736,30 @@ fn read_config(path: &Path) -> Result<Option<Vec<u8>>, CoreError> {
         Err(error) => return Err(error.into()),
     };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(CoreError::Config("config path must be a regular, non-symlink file".into()));
+        return Err(CoreError::Config(
+            "config path must be a regular, non-symlink file".into(),
+        ));
     }
     if metadata.len() > MAX_CONFIG_BYTES as u64 {
-        return Err(CoreError::Config("config exceeds 1 MiB and was left untouched".into()));
+        return Err(CoreError::Config(
+            "config exceeds 1 MiB and was left untouched".into(),
+        ));
     }
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
-    let mut file = options.open(path)?;
+    let file = options.open(path)?;
     if !file.metadata()?.is_file() {
-        return Err(CoreError::Config("config path is not a regular file".into()));
+        return Err(CoreError::Config(
+            "config path is not a regular file".into(),
+        ));
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take((MAX_CONFIG_BYTES + 1) as u64).read_to_end(&mut bytes)?;
+    file.take((MAX_CONFIG_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
     if bytes.len() > MAX_CONFIG_BYTES {
-        return Err(CoreError::Config("config grew beyond 1 MiB while being read".into()));
+        return Err(CoreError::Config(
+            "config grew beyond 1 MiB while being read".into(),
+        ));
     }
     Ok(Some(bytes))
 }
@@ -665,10 +773,12 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEMP_ID: AtomicU64 = AtomicU64::new(0);
-    let parent = path.parent()
+    let parent = path
+        .parent()
         .ok_or_else(|| CoreError::Config("config path has no parent".into()))?;
     let directory = open_directory_linux(parent, true, true)?;
-    let leaf = path.file_name()
+    let leaf = path
+        .file_name()
         .ok_or_else(|| CoreError::Config("invalid config filename".into()))?;
     let leaf = CString::new(leaf.as_bytes())
         .map_err(|_| CoreError::Config("config filename contains a NUL byte".into()))?;
@@ -689,13 +799,19 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
         let metadata = unsafe { existing.assume_init() };
         let kind = metadata.st_mode & libc::S_IFMT;
         if kind == libc::S_IFLNK {
-            return Err(CoreError::Config("refusing to replace a symlinked config file".into()));
+            return Err(CoreError::Config(
+                "refusing to replace a symlinked config file".into(),
+            ));
         }
         if kind != libc::S_IFREG {
-            return Err(CoreError::Config("config destination is not a regular file".into()));
+            return Err(CoreError::Config(
+                "config destination is not a regular file".into(),
+            ));
         }
         if metadata.st_nlink != 1 {
-            return Err(CoreError::Config("refusing to replace a multiply-linked config file".into()));
+            return Err(CoreError::Config(
+                "refusing to replace a multiply-linked config file".into(),
+            ));
         }
     } else {
         let error = std::io::Error::last_os_error();
@@ -717,11 +833,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
         libc::openat(
             directory.as_raw_fd(),
             temporary.as_ptr(),
-            libc::O_WRONLY
-                | libc::O_CREAT
-                | libc::O_EXCL
-                | libc::O_CLOEXEC
-                | libc::O_NOFOLLOW,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             0o600,
         )
     };
@@ -732,7 +844,9 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
     let write_result = file.write_all(bytes).and_then(|()| file.sync_all());
     drop(file);
     if let Err(error) = write_result {
-        unsafe { libc::unlinkat(directory.as_raw_fd(), temporary.as_ptr(), 0); }
+        unsafe {
+            libc::unlinkat(directory.as_raw_fd(), temporary.as_ptr(), 0);
+        }
         return Err(error.into());
     }
 
@@ -746,7 +860,9 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
     };
     if rename_result != 0 {
         let error = std::io::Error::last_os_error();
-        unsafe { libc::unlinkat(directory.as_raw_fd(), temporary.as_ptr(), 0); }
+        unsafe {
+            libc::unlinkat(directory.as_raw_fd(), temporary.as_ptr(), 0);
+        }
         return Err(error.into());
     }
     if unsafe { libc::fsync(directory.as_raw_fd()) } != 0 {
@@ -758,20 +874,24 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
 #[cfg(not(target_os = "linux"))]
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CoreError> {
     use std::io::Write;
-    let parent = path.parent()
+    let parent = path
+        .parent()
         .ok_or_else(|| CoreError::Config("config path has no parent".into()))?;
     secure_create_dir(parent)?;
     match path.symlink_metadata() {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(CoreError::Config("refusing a non-regular config destination".into()));
+                return Err(CoreError::Config(
+                    "refusing a non-regular config destination".into(),
+                ));
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
 
-    let name = path.file_name()
+    let name = path
+        .file_name()
         .ok_or_else(|| CoreError::Config("invalid config filename".into()))?;
     let temporary = parent.join(format!(
         ".{}.tmp-{}-{}",
@@ -833,7 +953,6 @@ fn secure_create_dir(path: &Path) -> Result<(), CoreError> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -852,15 +971,25 @@ mod tests {
         let config = Config::default();
         let code = config.export_code().unwrap();
         assert!(code.starts_with("CH1-"));
-        assert!(code.len() <= 60);
+        assert_eq!(
+            code.len(),
+            52,
+            "profile codes should remain compact and copyable"
+        );
         let mut imported = Config::default();
         imported.import_code(&code).unwrap();
         assert_eq!(config.color, imported.color);
         assert_eq!(config.shape, imported.shape);
         assert_eq!(config.reference_dot.enabled, imported.reference_dot.enabled);
         assert_eq!(config.reference_dot.size, imported.reference_dot.size);
-        assert_eq!(config.reference_dot.offset_x, imported.reference_dot.offset_x);
-        assert_eq!(config.reference_dot.offset_y, imported.reference_dot.offset_y);
+        assert_eq!(
+            config.reference_dot.offset_x,
+            imported.reference_dot.offset_x
+        );
+        assert_eq!(
+            config.reference_dot.offset_y,
+            imported.reference_dot.offset_y
+        );
         assert!((config.reference_dot.opacity - imported.reference_dot.opacity).abs() < 0.005);
     }
 
@@ -945,7 +1074,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("private/config.json");
         Config::default().save_atomic(&path).unwrap();
-        assert_eq!(path.parent().unwrap().metadata().unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            path.parent()
+                .unwrap()
+                .metadata()
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
         assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
     }
 
@@ -994,9 +1132,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let name = CString::new(path.file_name().unwrap().as_bytes()).unwrap();
         let parent = open_directory_linux(path.parent().unwrap(), true, true).unwrap();
-        let status = unsafe {
-            libc::mkfifoat(parent.as_raw_fd(), name.as_ptr(), 0o600)
-        };
+        let status = unsafe { libc::mkfifoat(parent.as_raw_fd(), name.as_ptr(), 0o600) };
         assert_eq!(status, 0);
         assert!(Config::load(&path).is_err());
         assert!(Config::default().save_atomic(&path).is_err());
@@ -1011,6 +1147,9 @@ mod tests {
         let oversized = vec![b' '; MAX_CONFIG_BYTES + 1];
         std::fs::write(&path, &oversized).unwrap();
         assert!(Config::load(&path).is_err());
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), (MAX_CONFIG_BYTES + 1) as u64);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            (MAX_CONFIG_BYTES + 1) as u64
+        );
     }
 }

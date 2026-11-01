@@ -98,7 +98,7 @@ The requested Rust Settings layout is intentionally smaller than the legacy five
 
 - **General:** enable/disable, auto-save, monitor selection and Reset remain immediately visible. Shortcut instructions and optional startup controls are folded into a collapsed section. The System actions sit in a small top menu.
 - **Appearance:** the main shape/color/opacity/size controls share a page with the 240 x 240 preview. Outline, shadow and the second reference dot can be expanded when needed. Global X/Y offsets and preview-background color are also available.
-- **Profile sharing:** appearance settings export to a short, versioned, checksummed human-copyable code. Monitor and machine-specific settings are intentionally excluded.
+- **Profile sharing:** appearance settings export to a short, versioned, checksummed human-copyable code. The current code is exactly 52 characters (`CH1-` plus a 48-character URL-safe Base64 encoding of a fixed 36-byte binary payload with CRC-16). Monitor and machine-specific settings are intentionally excluded; a regression test locks the code length.
 - No in-app title/header, footer, permanent status strip, dashboard cards, AI artwork, or resident tray process. General uses a compact window height; Appearance expands to fit its controls.
 - Closing Settings with the window manager's X ends the Settings process without stopping an already-enabled overlay. The close path must flush the final debounced state when auto-save is enabled and restore the saved state when auto-save is off.
 
@@ -158,7 +158,7 @@ The Windows and Linux builds are separate artifacts. Rust target triples support
 ## Porting exit criteria
 
 - [ ] Rust config reads current Python-generated JSON without destructive migration; unknown and invalid fields are handled deterministically.
-- [ ] All nine shapes and all appearance settings match the Python renderer, including edge extents, outline and shadow.
+- [ ] All eight supported shapes and all appearance settings match the Python renderer, including edge extents, outline, shadow and second-dot placement.
 - [ ] Multi-monitor targeting and hotplug behavior verified on real OS APIs.
 - [ ] Input pass-through, no-focus and topmost behavior verified per backend.
 - [ ] All CLI operations and cold/live toggle semantics retained.
@@ -178,13 +178,14 @@ This section records what was actually built and exercised on the Nobara x86_64 
 - `cargo check --features settings-ui --bins`: passed.
 - `cargo test --locked --features settings-ui --all-targets`: **19 passed** (18 shared-core/renderer tests and one Settings-preview regression).
 - Debug and optimized Linux builds of both executables: passed.
+- `cargo check --locked --target x86_64-pc-windows-msvc --features settings-ui --bins`: passed from the Linux host using the isolated Rust 1.96.0 MSVC standard-library target. This proves compile compatibility only; it does not test the Win32 overlay, window behavior or named-pipe security.
 - `git diff --check`: passed.
 - Python fallback: **99 tests passed**, Ruff clean, the repository's Bandit medium/high gate passed, and `pip-audit` found no known vulnerabilities.
 - X11 runtime smoke test under an isolated Xvfb display: passed. It verified 32-bit ARGB, no keyboard focus, an empty input shape, pointer click-through, cold-toggle startup and daemon exit after hide.
 - Settings-close smoke test under isolated Xvfb: passed. Closing the Settings window exited its process and left the enabled overlay daemon alive; hiding the overlay then exited that daemon.
 - Appearance preview regression: passed. The preview remains rendered when the real overlay is disabled.
 - The compact General, Appearance and System-popup layouts were captured and visually inspected under Xvfb. The separate Settings-close regression passed; a later multi-page screenshot harness did not close its window after opening the System popup, so popup-open close behavior is not counted as verified.
-- The local toolchain does not include `rustfmt`; local `cargo fmt` could not run. The new CI job explicitly installs rustfmt and runs `cargo fmt --check`.
+- The system toolchain did not ship `rustfmt`; to avoid changing the Nobara package set, Rust 1.96.0 and its matching formatter were installed under `/tmp`. `cargo fmt --all -- --check` passes locally. The CI job independently installs stable Rust plus rustfmt and runs the same formatter gate.
 
 ### Measured Linux overlay footprint
 

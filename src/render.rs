@@ -32,9 +32,11 @@ impl Rgba {
         if clean.len() != 6 {
             return Err(CoreError::Config("color must be #RRGGBB".into()));
         }
-        let parse = |index| u8::from_str_radix(&clean[index..index + 2], 16)
-            .map(|v| v as f32 / 255.0)
-            .map_err(|_| CoreError::Config("invalid color".into()));
+        let parse = |index| {
+            u8::from_str_radix(&clean[index..index + 2], 16)
+                .map(|v| v as f32 / 255.0)
+                .map_err(|_| CoreError::Config("invalid color".into()))
+        };
         Ok(Self {
             r: parse(0)?,
             g: parse(2)?,
@@ -66,7 +68,11 @@ pub fn render_crosshair(config: &Config) -> Result<Raster, CoreError> {
     c.normalize();
 
     let stroke = c.thickness as f32;
-    let outline = if c.outline.enabled { c.outline.thickness as f32 } else { 0.0 };
+    let outline = if c.outline.enabled {
+        c.outline.thickness as f32
+    } else {
+        0.0
+    };
     let shadow = c.shadow.enabled;
     let size = c.size as f32;
     let gap = c.gap as f32;
@@ -119,7 +125,9 @@ pub fn render_crosshair(config: &Config) -> Result<Raster, CoreError> {
         .and_then(|pixels| pixels.checked_mul(4))
         .ok_or_else(|| CoreError::Config("crosshair drawing is too large".into()))?;
     if bytes > 16 * 1024 * 1024 {
-        return Err(CoreError::Config("crosshair drawing exceeds its memory limit".into()));
+        return Err(CoreError::Config(
+            "crosshair drawing exceeds its memory limit".into(),
+        ));
     }
 
     let mut raster = Raster {
@@ -135,10 +143,7 @@ pub fn render_crosshair(config: &Config) -> Result<Raster, CoreError> {
     // The renderer is deliberately event-driven: it creates this tiny buffer
     // only when the crosshair is shown or its appearance changes.
     if c.shadow.enabled {
-        let sh = Rgba::from_hex(
-            &c.shadow.color,
-            c.shadow.opacity * c.opacity,
-        )?;
+        let sh = Rgba::from_hex(&c.shadow.color, c.shadow.opacity * c.opacity)?;
         draw_shape(
             &mut raster,
             &c.shape,
@@ -154,26 +159,37 @@ pub fn render_crosshair(config: &Config) -> Result<Raster, CoreError> {
     }
 
     if c.outline.enabled && c.outline.thickness > 0 {
-        let color = Rgba::from_hex(
-            &c.outline.color,
-            c.outline.opacity * c.opacity,
-        )?;
+        let color = Rgba::from_hex(&c.outline.color, c.outline.opacity * c.opacity)?;
         draw_shape(
-            &mut raster, &c.shape, cx, cy, size, gap, stroke, color,
-            true, c.outline.thickness as f32,
+            &mut raster,
+            &c.shape,
+            cx,
+            cy,
+            size,
+            gap,
+            stroke,
+            color,
+            true,
+            c.outline.thickness as f32,
         );
     }
 
     let main = Rgba::from_hex(&c.color, c.opacity)?;
     draw_shape(
-        &mut raster, &c.shape, cx, cy, size, gap, stroke, main, false, 0.0,
+        &mut raster,
+        &c.shape,
+        cx,
+        cy,
+        size,
+        gap,
+        stroke,
+        main,
+        false,
+        0.0,
     );
 
     if c.reference_dot.enabled {
-        let color = Rgba::from_hex(
-            &c.reference_dot.color,
-            c.reference_dot.opacity,
-        )?;
+        let color = Rgba::from_hex(&c.reference_dot.color, c.reference_dot.opacity)?;
         fill_circle(
             &mut raster,
             cx + c.reference_dot.offset_x as f32,
@@ -198,7 +214,11 @@ fn draw_shape(
     is_outline: bool,
     outline_thickness: f32,
 ) {
-    let width = if is_outline { thickness + outline_thickness * 2.0 } else { thickness };
+    let width = if is_outline {
+        thickness + outline_thickness * 2.0
+    } else {
+        thickness
+    };
     let dot_radius = if is_outline {
         (size + outline_thickness).max(1.0)
     } else {
@@ -213,7 +233,11 @@ fn draw_shape(
                 raster,
                 cx,
                 cy,
-                if is_outline { (thickness * 0.9 + outline_thickness).max(1.0) } else { (thickness * 0.9).max(1.0) },
+                if is_outline {
+                    (thickness * 0.9 + outline_thickness).max(1.0)
+                } else {
+                    (thickness * 0.9).max(1.0)
+                },
                 color,
             );
         }
@@ -224,18 +248,58 @@ fn draw_shape(
             draw_line(raster, cx - g, cy, cx - g - size, cy, width, color);
             draw_line(raster, cx + g, cy, cx + g + size, cy, width, color);
             if shape == "cross_dot" {
-                let radius = if is_outline { thickness * 0.9 + outline_thickness } else { thickness * 0.9 };
+                let radius = if is_outline {
+                    thickness * 0.9 + outline_thickness
+                } else {
+                    thickness * 0.9
+                };
                 fill_circle(raster, cx, cy, radius.max(1.0), color);
             }
         }
         "x" | "x_dot" => {
             let g = gap;
-            draw_line(raster, cx - g, cy - g, cx - g - size, cy - g - size, width, color);
-            draw_line(raster, cx + g, cy + g, cx + g + size, cy + g + size, width, color);
-            draw_line(raster, cx - g, cy + g, cx - g - size, cy + g + size, width, color);
-            draw_line(raster, cx + g, cy - g, cx + g + size, cy - g - size, width, color);
+            draw_line(
+                raster,
+                cx - g,
+                cy - g,
+                cx - g - size,
+                cy - g - size,
+                width,
+                color,
+            );
+            draw_line(
+                raster,
+                cx + g,
+                cy + g,
+                cx + g + size,
+                cy + g + size,
+                width,
+                color,
+            );
+            draw_line(
+                raster,
+                cx - g,
+                cy + g,
+                cx - g - size,
+                cy + g + size,
+                width,
+                color,
+            );
+            draw_line(
+                raster,
+                cx + g,
+                cy - g,
+                cx + g + size,
+                cy - g - size,
+                width,
+                color,
+            );
             if shape == "x_dot" {
-                let radius = if is_outline { thickness * 0.9 + outline_thickness } else { thickness * 0.9 };
+                let radius = if is_outline {
+                    thickness * 0.9 + outline_thickness
+                } else {
+                    thickness * 0.9
+                };
                 fill_circle(raster, cx, cy, radius.max(1.0), color);
             }
         }
@@ -244,29 +308,46 @@ fn draw_shape(
 }
 
 fn fill_circle(raster: &mut Raster, cx: f32, cy: f32, radius: f32, color: Rgba) {
-    draw_coverage(raster, cx - radius - 1.0, cy - radius - 1.0,
-        cx + radius + 1.0, cy + radius + 1.0, color,
+    draw_coverage(
+        raster,
+        cx - radius - 1.0,
+        cy - radius - 1.0,
+        cx + radius + 1.0,
+        cy + radius + 1.0,
+        color,
         |x, y| {
             let dx = x - cx;
             let dy = y - cy;
-            if dx * dx + dy * dy <= radius * radius { 1.0 } else { 0.0 }
-        });
+            if dx * dx + dy * dy <= radius * radius {
+                1.0
+            } else {
+                0.0
+            }
+        },
+    );
 }
 
 fn stroke_circle(raster: &mut Raster, cx: f32, cy: f32, radius: f32, width: f32, color: Rgba) {
     let half = width.max(0.5) / 2.0;
-    draw_coverage(raster, cx - radius - half - 1.0, cy - radius - half - 1.0,
-        cx + radius + half + 1.0, cy + radius + half + 1.0, color,
+    draw_coverage(
+        raster,
+        cx - radius - half - 1.0,
+        cy - radius - half - 1.0,
+        cx + radius + half + 1.0,
+        cy + radius + half + 1.0,
+        color,
         |x, y| {
             let distance = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
-            if (distance - radius).abs() <= half { 1.0 } else { 0.0 }
-        });
+            if (distance - radius).abs() <= half {
+                1.0
+            } else {
+                0.0
+            }
+        },
+    );
 }
 
-fn draw_line(
-    raster: &mut Raster, x0: f32, y0: f32, x1: f32, y1: f32,
-    width: f32, color: Rgba,
-) {
+fn draw_line(raster: &mut Raster, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: Rgba) {
     let half = width.max(0.5) / 2.0;
     draw_coverage(
         raster,
@@ -304,18 +385,18 @@ fn draw_coverage(
     color: Rgba,
     inside: impl Fn(f32, f32) -> f32,
 ) {
-    const SAMPLES: [(f32, f32); 4] = [
-        (0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75),
-    ];
+    const SAMPLES: [(f32, f32); 4] = [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)];
     let x0 = (min_x.floor() as i32).clamp(0, raster.width as i32);
     let y0 = (min_y.floor() as i32).clamp(0, raster.height as i32);
     let x1 = (max_x.ceil() as i32).clamp(0, raster.width as i32);
     let y1 = (max_y.ceil() as i32).clamp(0, raster.height as i32);
     for y in y0..y1 {
         for x in x0..x1 {
-            let coverage = SAMPLES.iter()
+            let coverage = SAMPLES
+                .iter()
                 .map(|(sx, sy)| inside(x as f32 + sx, y as f32 + sy))
-                .sum::<f32>() / SAMPLES.len() as f32;
+                .sum::<f32>()
+                / SAMPLES.len() as f32;
             if coverage > 0.0 {
                 blend_pixel(raster, x as u32, y as u32, color, coverage);
             }
@@ -325,7 +406,9 @@ fn draw_coverage(
 
 fn blend_pixel(raster: &mut Raster, x: u32, y: u32, color: Rgba, coverage: f32) {
     let source_alpha = (color.a * coverage).clamp(0.0, 1.0);
-    if source_alpha <= 0.0 { return; }
+    if source_alpha <= 0.0 {
+        return;
+    }
     let index = ((y * raster.width + x) * 4) as usize;
     let destination_alpha = raster.bgra_premultiplied[index + 3] as f32 / 255.0;
     let remain = 1.0 - source_alpha;
@@ -363,7 +446,10 @@ mod tests {
         config.gap = 200;
         let raster = render_crosshair(&config).unwrap();
         assert!(raster.width > 500 && raster.height > 500);
-        assert_eq!(raster.bgra_premultiplied.len(), raster.width as usize * raster.height as usize * 4);
+        assert_eq!(
+            raster.bgra_premultiplied.len(),
+            raster.width as usize * raster.height as usize * 4
+        );
     }
 
     #[test]
@@ -379,7 +465,16 @@ mod tests {
 
     #[test]
     fn every_shape_keeps_its_drawn_pixels_inside_the_small_surface() {
-        for shape in ["dot", "cross", "x", "plus", "ring", "dot_ring", "cross_dot", "x_dot"] {
+        for shape in [
+            "dot",
+            "cross",
+            "x",
+            "plus",
+            "ring",
+            "dot_ring",
+            "cross_dot",
+            "x_dot",
+        ] {
             let mut config = Config::default();
             config.shape = shape.into();
             config.size = 1;
@@ -391,12 +486,28 @@ mod tests {
             let w = raster.width as usize;
             let h = raster.height as usize;
             for x in 0..w {
-                assert_eq!(raster.bgra_premultiplied[(x * 4) + 3], 0, "{shape}: top edge");
-                assert_eq!(raster.bgra_premultiplied[((h - 1) * w + x) * 4 + 3], 0, "{shape}: bottom edge");
+                assert_eq!(
+                    raster.bgra_premultiplied[(x * 4) + 3],
+                    0,
+                    "{shape}: top edge"
+                );
+                assert_eq!(
+                    raster.bgra_premultiplied[((h - 1) * w + x) * 4 + 3],
+                    0,
+                    "{shape}: bottom edge"
+                );
             }
             for y in 0..h {
-                assert_eq!(raster.bgra_premultiplied[(y * w) * 4 + 3], 0, "{shape}: left edge");
-                assert_eq!(raster.bgra_premultiplied[(y * w + w - 1) * 4 + 3], 0, "{shape}: right edge");
+                assert_eq!(
+                    raster.bgra_premultiplied[(y * w) * 4 + 3],
+                    0,
+                    "{shape}: left edge"
+                );
+                assert_eq!(
+                    raster.bgra_premultiplied[(y * w + w - 1) * 4 + 3],
+                    0,
+                    "{shape}: right edge"
+                );
             }
         }
     }
@@ -409,7 +520,10 @@ mod tests {
         let compact = render_crosshair(&config).unwrap();
         config.gap = 200;
         let unchanged = render_crosshair(&config).unwrap();
-        assert_eq!((compact.width, compact.height), (unchanged.width, unchanged.height));
+        assert_eq!(
+            (compact.width, compact.height),
+            (unchanged.width, unchanged.height)
+        );
     }
 
     #[test]

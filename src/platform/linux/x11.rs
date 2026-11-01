@@ -1,5 +1,5 @@
-use crosshair_core::render::{render_crosshair, Raster};
-use crosshair_core::{AppPaths, Config, APP_VERSION};
+use crosshair_core::render::{Raster, render_crosshair};
+use crosshair_core::{APP_VERSION, AppPaths, Config};
 use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Read, Write},
@@ -11,11 +11,11 @@ use x11rb::{
     connection::Connection as _,
     properties::WmHints,
     protocol::{
-        randr,
-        render,
-        shape,
-        xproto::{self, ConnectionExt as _, AtomEnum, ClipOrdering, CreateWindowAux, EventMask, ImageFormat, PropMode, StackMode, WindowClass},
-        Event,
+        Event, randr, render, shape,
+        xproto::{
+            self, AtomEnum, ClipOrdering, ConnectionExt as _, CreateWindowAux, EventMask,
+            ImageFormat, PropMode, StackMode, WindowClass,
+        },
     },
     rust_connection::RustConnection,
     wrapper::ConnectionExt as WrapperExt,
@@ -60,11 +60,14 @@ impl X11Runtime {
     fn enumerate_outputs(&self) -> Result<Vec<Output>, String> {
         let cookie = randr::get_monitors(&self.conn, self.root, true)
             .map_err(|error| format!("Could not request RandR monitors: {error}"))?;
-        let reply = cookie.reply()
+        let reply = cookie
+            .reply()
             .map_err(|error| format!("Could not read RandR monitor reply: {error}"))?;
         let mut outputs = Vec::new();
         for (index, monitor) in reply.monitors.into_iter().enumerate() {
-            let name = self.conn.get_atom_name(monitor.name)
+            let name = self
+                .conn
+                .get_atom_name(monitor.name)
                 .map_err(|error| format!("Could not request monitor name: {error}"))?
                 .reply()
                 .map(|reply| String::from_utf8_lossy(&reply.name).into_owned())
@@ -96,13 +99,19 @@ impl X11Runtime {
     }
 
     fn pointer_output(&self, outputs: &[Output]) -> Option<u32> {
-        let pointer = xproto::query_pointer(&self.conn, self.root).ok()?.reply().ok()?;
-        outputs.iter().find(|output| {
-            pointer.root_x as i32 >= output.x
-                && pointer.root_y as i32 >= output.y
-                && (pointer.root_x as i32) < output.x + output.width as i32
-                && (pointer.root_y as i32) < output.y + output.height as i32
-        }).map(|output| output.id)
+        let pointer = xproto::query_pointer(&self.conn, self.root)
+            .ok()?
+            .reply()
+            .ok()?;
+        outputs
+            .iter()
+            .find(|output| {
+                pointer.root_x as i32 >= output.x
+                    && pointer.root_y as i32 >= output.y
+                    && (pointer.root_x as i32) < output.x + output.width as i32
+                    && (pointer.root_y as i32) < output.y + output.height as i32
+            })
+            .map(|output| output.id)
     }
 
     fn selected_outputs(&mut self) -> Result<Vec<Output>, String> {
@@ -111,17 +120,35 @@ impl X11Runtime {
             self.active_output = self.pointer_output(&self.outputs);
         }
         let selected = match self.config.monitor_mode.as_str() {
-            "primary" => self.outputs.iter().find(|output| output.primary)
-                .or_else(|| self.outputs.first()).cloned().into_iter().collect(),
+            "primary" => self
+                .outputs
+                .iter()
+                .find(|output| output.primary)
+                .or_else(|| self.outputs.first())
+                .cloned()
+                .into_iter()
+                .collect(),
             "name" => {
                 let ordinal = self.config.monitor_name_ordinal as usize;
-                self.outputs.iter()
+                self.outputs
+                    .iter()
                     .filter(|output| output.name == self.config.monitor_name)
-                    .nth(ordinal).cloned().into_iter().collect()
+                    .nth(ordinal)
+                    .cloned()
+                    .into_iter()
+                    .collect()
             }
-            "index" => self.outputs.get(self.config.monitor_index as usize).cloned().into_iter().collect(),
-            "active" => self.active_output.and_then(|id| self.outputs.iter().find(|output| output.id == id).cloned())
-                .into_iter().collect(),
+            "index" => self
+                .outputs
+                .get(self.config.monitor_index as usize)
+                .cloned()
+                .into_iter()
+                .collect(),
+            "active" => self
+                .active_output
+                .and_then(|id| self.outputs.iter().find(|output| output.id == id).cloned())
+                .into_iter()
+                .collect(),
             _ => self.outputs.clone(),
         };
         if selected.is_empty() {
@@ -152,8 +179,14 @@ impl X11Runtime {
             let y = y.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
 
             let colormap = self.conn.generate_id().map_err(|error| error.to_string())?;
-            xproto::create_colormap(&self.conn, xproto::ColormapAlloc::NONE, colormap, self.root, self.argb_visual)
-                .map_err(|error| error.to_string())?;
+            xproto::create_colormap(
+                &self.conn,
+                xproto::ColormapAlloc::NONE,
+                colormap,
+                self.root,
+                self.argb_visual,
+            )
+            .map_err(|error| error.to_string())?;
             let window = self.conn.generate_id().map_err(|error| error.to_string())?;
             let attributes = CreateWindowAux::new()
                 .background_pixel(0)
@@ -173,38 +206,65 @@ impl X11Runtime {
                 WindowClass::INPUT_OUTPUT,
                 self.argb_visual,
                 &attributes,
-            ).map_err(|error| format!("Could not create ARGB overlay window: {error}"))?;
+            )
+            .map_err(|error| format!("Could not create ARGB overlay window: {error}"))?;
 
             let gc = self.conn.generate_id().map_err(|error| error.to_string())?;
             xproto::create_gc(&self.conn, gc, window, &xproto::CreateGCAux::new())
                 .map_err(|error| error.to_string())?;
 
             // ICCCM input=false tells a window manager not to focus this utility.
-            WmHints { input: Some(false), ..WmHints::new() }
-                .set(&self.conn, window)
-                .map_err(|error| error.to_string())?;
+            WmHints {
+                input: Some(false),
+                ..WmHints::new()
+            }
+            .set(&self.conn, window)
+            .map_err(|error| error.to_string())?;
 
             let wm_name = intern(&self.conn, "WM_NAME")?;
-            self.conn.change_property8(PropMode::REPLACE, window, wm_name, AtomEnum::STRING, b"Crosshair")
+            self.conn
+                .change_property8(
+                    PropMode::REPLACE,
+                    window,
+                    wm_name,
+                    AtomEnum::STRING,
+                    b"Crosshair",
+                )
                 .map_err(|error| error.to_string())?;
             let wm_class = intern(&self.conn, "WM_CLASS")?;
-            self.conn.change_property8(PropMode::REPLACE, window, wm_class, AtomEnum::STRING, b"crosshair\0Crosshair\0")
+            self.conn
+                .change_property8(
+                    PropMode::REPLACE,
+                    window,
+                    wm_class,
+                    AtomEnum::STRING,
+                    b"crosshair\0Crosshair\0",
+                )
                 .map_err(|error| error.to_string())?;
             let utility = intern(&self.conn, "_NET_WM_WINDOW_TYPE_UTILITY")?;
             let window_type = intern(&self.conn, "_NET_WM_WINDOW_TYPE")?;
-            self.conn.change_property32(PropMode::REPLACE, window, window_type, AtomEnum::ATOM, &[utility])
+            self.conn
+                .change_property32(
+                    PropMode::REPLACE,
+                    window,
+                    window_type,
+                    AtomEnum::ATOM,
+                    &[utility],
+                )
                 .map_err(|error| error.to_string())?;
             let state_atom = intern(&self.conn, "_NET_WM_STATE")?;
             let above = intern(&self.conn, "_NET_WM_STATE_ABOVE")?;
             let skip_taskbar = intern(&self.conn, "_NET_WM_STATE_SKIP_TASKBAR")?;
             let skip_pager = intern(&self.conn, "_NET_WM_STATE_SKIP_PAGER")?;
-            self.conn.change_property32(
-                PropMode::REPLACE,
-                window,
-                state_atom,
-                AtomEnum::ATOM,
-                &[above, skip_taskbar, skip_pager],
-            ).map_err(|error| error.to_string())?;
+            self.conn
+                .change_property32(
+                    PropMode::REPLACE,
+                    window,
+                    state_atom,
+                    AtomEnum::ATOM,
+                    &[above, skip_taskbar, skip_pager],
+                )
+                .map_err(|error| error.to_string())?;
 
             // Shape INPUT to an empty region: pointer clicks and wheel events pass through.
             shape::rectangles(
@@ -216,18 +276,27 @@ impl X11Runtime {
                 0,
                 0,
                 &[],
-            ).map_err(|error| error.to_string())?;
+            )
+            .map_err(|error| error.to_string())?;
 
             xproto::map_window(&self.conn, window).map_err(|error| error.to_string())?;
             xproto::configure_window(
                 &self.conn,
                 window,
                 &xproto::ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
-            ).map_err(|error| error.to_string())?;
+            )
+            .map_err(|error| error.to_string())?;
             let name = output.name.clone();
-            self.surfaces.insert(output.id, Surface {
-                window, gc, colormap, raster, name,
-            });
+            self.surfaces.insert(
+                output.id,
+                Surface {
+                    window,
+                    gc,
+                    colormap,
+                    raster,
+                    name,
+                },
+            );
         }
         self.conn.flush().map_err(|error| error.to_string())?;
         for id in self.surfaces.keys().copied().collect::<Vec<_>>() {
@@ -245,7 +314,9 @@ impl X11Runtime {
     }
 
     fn draw_surface(&self, output_id: u32) -> Result<(), String> {
-        let surface = self.surfaces.get(&output_id)
+        let surface = self
+            .surfaces
+            .get(&output_id)
             .ok_or_else(|| "Crosshair output surface disappeared".to_string())?;
         let raster = &surface.raster;
         let bytes_per_row = raster.width as usize * 4;
@@ -254,7 +325,9 @@ impl X11Runtime {
             &raster.bgra_premultiplied
         } else {
             converted = vec![0u8; raster.bgra_premultiplied.len()];
-            for (source, target) in raster.bgra_premultiplied.chunks_exact(4)
+            for (source, target) in raster
+                .bgra_premultiplied
+                .chunks_exact(4)
                 .zip(converted.chunks_exact_mut(4))
             {
                 target.copy_from_slice(&[source[3], source[2], source[1], source[0]]);
@@ -280,7 +353,8 @@ impl X11Runtime {
                 0,
                 self.argb_depth,
                 &data[start..end],
-            ).map_err(|error| format!("Could not draw Crosshair pixels: {error}"))?;
+            )
+            .map_err(|error| format!("Could not draw Crosshair pixels: {error}"))?;
         }
         self.conn.flush().map_err(|error| error.to_string())?;
         Ok(())
@@ -294,7 +368,9 @@ impl X11Runtime {
         }
         let selected = self.selected_outputs()?;
         if selected.len() != self.surfaces.len()
-            || selected.iter().any(|output| !self.surfaces.contains_key(&output.id))
+            || selected
+                .iter()
+                .any(|output| !self.surfaces.contains_key(&output.id))
         {
             self.outputs_dirty = true;
             return Ok(());
@@ -314,7 +390,8 @@ impl X11Runtime {
                         .y(y)
                         .width(width as u32)
                         .height(height as u32),
-                ).map_err(|error| error.to_string())?;
+                )
+                .map_err(|error| error.to_string())?;
                 surface.raster = raster;
             }
             self.draw_surface(output.id)?;
@@ -333,35 +410,51 @@ fn intern(conn: &RustConnection, name: &str) -> Result<u32, String> {
 
 pub fn run(config: Config, paths: AppPaths) -> Result<(), String> {
     let _lock = crate::wayland::acquire_daemon_lock(&paths)?;
-    let (conn, screen_num) = x11rb::connect(None)
-        .map_err(|error| format!("Could not connect to X11: {error}"))?;
+    let (conn, screen_num) =
+        x11rb::connect(None).map_err(|error| format!("Could not connect to X11: {error}"))?;
     let screen = &conn.setup().roots[screen_num];
     let root = screen.root;
 
     let pict_cookie = render::query_pict_formats(&conn)
         .map_err(|error| format!("X11 RENDER extension is not available: {error}"))?;
-    let pict = pict_cookie.reply()
+    let pict = pict_cookie
+        .reply()
         .map_err(|error| format!("Could not read X11 RENDER formats: {error}"))?;
-    let pict_screen = pict.screens.get(screen_num)
+    let pict_screen = pict
+        .screens
+        .get(screen_num)
         .ok_or_else(|| "X11 RENDER did not return formats for this screen".to_string())?;
-    let argb_format = pict.formats.iter().find(|format| {
-        format.type_ == render::PictType::DIRECT
-            && format.depth == 32
-            && format.direct.red_shift == 16 && format.direct.red_mask == 0xff
-            && format.direct.green_shift == 8 && format.direct.green_mask == 0xff
-            && format.direct.blue_shift == 0 && format.direct.blue_mask == 0xff
-            && format.direct.alpha_shift == 24 && format.direct.alpha_mask == 0xff
-    }).ok_or_else(|| "X11 server does not offer a standard 32-bit ARGB visual.".to_string())?;
-    let argb_visual = pict_screen.depths.iter()
+    let argb_format = pict
+        .formats
+        .iter()
+        .find(|format| {
+            format.type_ == render::PictType::DIRECT
+                && format.depth == 32
+                && format.direct.red_shift == 16
+                && format.direct.red_mask == 0xff
+                && format.direct.green_shift == 8
+                && format.direct.green_mask == 0xff
+                && format.direct.blue_shift == 0
+                && format.direct.blue_mask == 0xff
+                && format.direct.alpha_shift == 24
+                && format.direct.alpha_mask == 0xff
+        })
+        .ok_or_else(|| "X11 server does not offer a standard 32-bit ARGB visual.".to_string())?;
+    let argb_visual = pict_screen
+        .depths
+        .iter()
         .filter(|depth| depth.depth == 32)
         .flat_map(|depth| depth.visuals.iter())
         .find(|visual| visual.format == argb_format.id)
         .map(|visual| visual.visual)
-        .ok_or_else(|| "X11 server has ARGB_32 picture format but no matching depth-32 visual.".to_string())?;
+        .ok_or_else(|| {
+            "X11 server has ARGB_32 picture format but no matching depth-32 visual.".to_string()
+        })?;
 
     let randr_cookie = randr::query_version(&conn, 1, 5)
         .map_err(|error| format!("Could not initialize RandR monitor support: {error}"))?;
-    let randr_version = randr_cookie.reply()
+    let randr_version = randr_cookie
+        .reply()
         .map_err(|error| format!("Could not read RandR version: {error}"))?;
     let _ = randr_version;
     let _ = randr::select_input(
@@ -375,7 +468,9 @@ pub fn run(config: Config, paths: AppPaths) -> Result<(), String> {
     );
 
     let listener = crate::wayland::prepare_listener(&paths)?;
-    let _socket_guard = crate::wayland::SocketPathGuard { path: paths.socket_file.clone() };
+    let _socket_guard = crate::wayland::SocketPathGuard {
+        path: paths.socket_file.clone(),
+    };
     let mut runtime = X11Runtime {
         conn,
         screen_num,
@@ -408,7 +503,8 @@ pub fn run(config: Config, paths: AppPaths) -> Result<(), String> {
                 revents: 0,
             },
         ];
-        let polled = unsafe { libc::poll(descriptors.as_mut_ptr(), descriptors.len() as _, timeout_ms) };
+        let polled =
+            unsafe { libc::poll(descriptors.as_mut_ptr(), descriptors.len() as _, timeout_ms) };
         if polled < 0 {
             let error = std::io::Error::last_os_error();
             if error.kind() == std::io::ErrorKind::Interrupted {
@@ -432,14 +528,24 @@ pub fn run(config: Config, paths: AppPaths) -> Result<(), String> {
             }
         }
         if descriptors[0].revents & libc::POLLIN != 0 {
-            while let Some(event) = runtime.conn.poll_for_event().map_err(|error| error.to_string())? {
+            while let Some(event) = runtime
+                .conn
+                .poll_for_event()
+                .map_err(|error| error.to_string())?
+            {
                 match event {
-                    Event::RandrNotify(_) | Event::RandrScreenChangeNotify(_) => runtime.outputs_dirty = true,
+                    Event::RandrNotify(_) | Event::RandrScreenChangeNotify(_) => {
+                        runtime.outputs_dirty = true
+                    }
                     Event::Expose(expose) => {
                         if expose.count == 0 {
-                            if let Some(id) = runtime.surfaces.iter()
-                                .find_map(|(id, surface)| if surface.window == expose.window { Some(*id) } else { None })
-                            {
+                            if let Some(id) = runtime.surfaces.iter().find_map(|(id, surface)| {
+                                if surface.window == expose.window {
+                                    Some(*id)
+                                } else {
+                                    None
+                                }
+                            }) {
                                 runtime.draw_surface(id)?;
                             }
                         }
@@ -491,41 +597,61 @@ fn handle_request(mut stream: UnixStream, runtime: &mut X11Runtime) -> Result<()
     let mut line = Vec::with_capacity(1024);
     {
         let reader = BufReader::new(&stream);
-        reader.take(64 * 1024).read_until(b'\n', &mut line)
+        reader
+            .take(64 * 1024)
+            .read_until(b'\n', &mut line)
             .map_err(|error| format!("Could not read IPC request: {error}"))?;
     }
     if line.len() > 64 * 1024 {
         return Err("IPC request exceeds 64 KiB".into());
     }
-    let request: serde_json::Value = serde_json::from_slice(&line)
-        .map_err(|_| "Invalid JSON in IPC request".to_string())?;
-    let command = request.get("cmd").and_then(serde_json::Value::as_str)
+    let request: serde_json::Value =
+        serde_json::from_slice(&line).map_err(|_| "Invalid JSON in IPC request".to_string())?;
+    let command = request
+        .get("cmd")
+        .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "IPC request is missing a command".to_string())?;
     let mut response = serde_json::json!({"ok": true});
     match command {
         "status" => {
             response["enabled"] = serde_json::Value::Bool(runtime.config.enabled);
             response["version"] = serde_json::Value::String(APP_VERSION.into());
-            response["monitors"] = serde_json::Value::Array(runtime.surfaces.values()
-                .map(|surface| serde_json::Value::String(surface.name.clone())).collect());
+            response["monitors"] = serde_json::Value::Array(
+                runtime
+                    .surfaces
+                    .values()
+                    .map(|surface| serde_json::Value::String(surface.name.clone()))
+                    .collect(),
+            );
         }
         "toggle" => {
             runtime.config.enabled = !runtime.config.enabled;
-            runtime.config.save_atomic(&runtime.paths.config_file).map_err(|error| error.to_string())?;
+            runtime
+                .config
+                .save_atomic(&runtime.paths.config_file)
+                .map_err(|error| error.to_string())?;
             runtime.outputs_dirty = true;
         }
         "show" => {
             runtime.config.enabled = true;
-            runtime.config.save_atomic(&runtime.paths.config_file).map_err(|error| error.to_string())?;
+            runtime
+                .config
+                .save_atomic(&runtime.paths.config_file)
+                .map_err(|error| error.to_string())?;
             runtime.outputs_dirty = true;
         }
         "hide" => {
             runtime.config.enabled = false;
-            runtime.config.save_atomic(&runtime.paths.config_file).map_err(|error| error.to_string())?;
+            runtime
+                .config
+                .save_atomic(&runtime.paths.config_file)
+                .map_err(|error| error.to_string())?;
             runtime.outputs_dirty = true;
         }
         "preview" | "set" => {
-            let payload = request.get("payload").ok_or_else(|| "Missing settings payload".to_string())?;
+            let payload = request
+                .get("payload")
+                .ok_or_else(|| "Missing settings payload".to_string())?;
             let encoded = serde_json::to_string(payload).map_err(|error| error.to_string())?;
             let candidate = Config::from_json(&encoded).map_err(|error| error.to_string())?;
             let placement_changed = runtime.config.enabled != candidate.enabled
@@ -534,30 +660,42 @@ fn handle_request(mut stream: UnixStream, runtime: &mut X11Runtime) -> Result<()
                 || runtime.config.monitor_name != candidate.monitor_name
                 || runtime.config.monitor_name_ordinal != candidate.monitor_name_ordinal;
             if command == "set" {
-                candidate.save_atomic(&runtime.paths.config_file).map_err(|error| error.to_string())?;
+                candidate
+                    .save_atomic(&runtime.paths.config_file)
+                    .map_err(|error| error.to_string())?;
             }
             runtime.config = candidate;
-            if placement_changed { runtime.outputs_dirty = true; } else { runtime.redraw_dirty = true; }
+            if placement_changed {
+                runtime.outputs_dirty = true;
+            } else {
+                runtime.redraw_dirty = true;
+            }
         }
         "reload" => {
-            let candidate = Config::load(&runtime.paths.config_file).map_err(|error| error.to_string())?;
+            let candidate =
+                Config::load(&runtime.paths.config_file).map_err(|error| error.to_string())?;
             let placement_changed = runtime.config.enabled != candidate.enabled
                 || runtime.config.monitor_mode != candidate.monitor_mode
                 || runtime.config.monitor_index != candidate.monitor_index
                 || runtime.config.monitor_name != candidate.monitor_name
                 || runtime.config.monitor_name_ordinal != candidate.monitor_name_ordinal;
             runtime.config = candidate;
-            if placement_changed { runtime.outputs_dirty = true; } else { runtime.redraw_dirty = true; }
+            if placement_changed {
+                runtime.outputs_dirty = true;
+            } else {
+                runtime.redraw_dirty = true;
+            }
         }
         "quit" | "restart" => runtime.quit = true,
         _ => response = serde_json::json!({"ok": false, "message": "Unknown IPC command"}),
     }
     let mut encoded = serde_json::to_vec(&response).map_err(|error| error.to_string())?;
     encoded.push(b'\n');
-    stream.write_all(&encoded).map_err(|error| error.to_string())?;
+    stream
+        .write_all(&encoded)
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
-
 
 pub fn list_outputs() -> Result<Vec<crosshair_core::MonitorDescriptor>, String> {
     let (conn, screen_num) = x11rb::connect(None)
@@ -565,11 +703,13 @@ pub fn list_outputs() -> Result<Vec<crosshair_core::MonitorDescriptor>, String> 
     let root = conn.setup().roots[screen_num].root;
     let cookie = randr::get_monitors(&conn, root, true)
         .map_err(|error| format!("Could not request RandR monitors: {error}"))?;
-    let reply = cookie.reply()
+    let reply = cookie
+        .reply()
         .map_err(|error| format!("Could not read RandR monitor list: {error}"))?;
     let mut named_outputs = Vec::with_capacity(reply.monitors.len());
     for (index, monitor) in reply.monitors.into_iter().enumerate() {
-        let name = conn.get_atom_name(monitor.name)
+        let name = conn
+            .get_atom_name(monitor.name)
             .map_err(|error| format!("Could not request monitor name: {error}"))?
             .reply()
             .map(|reply| String::from_utf8_lossy(&reply.name).into_owned())
