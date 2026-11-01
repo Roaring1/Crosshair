@@ -3,6 +3,7 @@
 ## Unreleased — 31/10/2026
 
 - **Hardened:** the daemon lock opens nonblocking with `O_NOFOLLOW` and accepts only regular files; FIFO and device-node paths are rejected before flock or file mutation. Lock descriptors are closed on every validation failure.
+- **Fixed dependency advisory:** the hosted Python 3.10 dependency audit identified 17 advisories affecting transitive `filelock==4.1.0`; development requirements now constrain `filelock==4.2.1`, the fix version reported by the advisory database.
 - **Hardened:** daemon shutdown removes only the exact socket it created, matching device, inode and socket type. A replacement file at the socket path is retained.
 - **Added:** a FIFO lock-path regression test verifies this rejection does not block daemon startup.
 
