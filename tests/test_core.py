@@ -247,3 +247,61 @@ def test_relative_xdg_paths_ignored(tmp_path):
     app = core.AppPaths.from_env({"HOME": str(tmp_path), "XDG_RUNTIME_DIR": "relative"})
     assert app.runtime_fallback is True
     assert app.runtime_dir.is_absolute()
+
+
+def test_recv_line_rejects_oversized_message():
+    server, client = socket.socketpair()
+    try:
+        client.sendall(b"x" * (core.MAX_IPC_BYTES + 1))
+        with pytest.raises(core.ProtocolError, match="too large"):
+            core.recv_line(server)
+    finally:
+        server.close()
+        client.close()
+
+
+def test_daemon_lock_refuses_symlink_without_touching_target(tmp_path):
+    app = paths(tmp_path)
+    core.ensure_directory(app.runtime_dir)
+    target = tmp_path / "lock-target"
+    target.write_text("preserve", encoding="utf-8")
+    app.lock_file.symlink_to(target)
+
+    with pytest.raises(core.CoreError, match="symlink lock"):
+        core.DaemonLock.acquire(app.lock_file)
+
+    assert target.read_text(encoding="utf-8") == "preserve"
+    assert app.lock_file.is_symlink()
+
+
+def test_ipc_server_refuses_symlink_socket_and_releases_lock(tmp_path):
+    app = paths(tmp_path)
+    core.ensure_runtime(app)
+    target = tmp_path / "socket-target"
+    target.write_text("preserve", encoding="utf-8")
+    app.socket_file.symlink_to(target)
+    server = core.IpcServer(app, lambda _request: {"ok": True}, core.setup_logging(app))
+
+    with pytest.raises(core.CoreError, match="symlink socket"):
+        server.start()
+
+    assert target.read_text(encoding="utf-8") == "preserve"
+    assert app.socket_file.is_symlink()
+    # A failed start must not strand the single-instance lock.
+    lock = core.DaemonLock.acquire(app.lock_file)
+    assert lock is not None
+    lock.close()
+
+
+def test_ipc_rejects_different_peer_uid_and_remains_available(tmp_path, monkeypatch):
+    app = paths(tmp_path)
+    server = core.IpcServer(app, lambda _request: {"ok": True}, core.setup_logging(app))
+    server.start()
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(core, "peer_uid", lambda _connection: -1)
+            rejected = core.ipc_call(app, {"cmd": "status"})
+        assert rejected == {"ok": False, "message": "Rejected peer uid -1"}
+        assert core.ipc_call(app, {"cmd": "status"}) == {"ok": True}
+    finally:
+        server.stop()

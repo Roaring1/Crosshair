@@ -15,7 +15,7 @@
 #     install/uninstall (C-03).
 #   - Restart uses a pipe-EOF handoff so the replacement never races the
 #     outgoing process for the lock/socket (H-11).
-#   - See INTEGRATION.md and the release-gate checklist for the full list.
+#   - See RUNBOOK.md for the release-gate checklist and machine-level validation.
 #
 # 28/05/2026 patch (v3.1, preserved behavior): deduped draw code, X11 input
 #   passthrough + type hint, dot_ring shape, --status flag, active-monitor
