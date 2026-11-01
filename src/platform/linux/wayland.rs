@@ -872,7 +872,7 @@ mod shm_canvas_tests {
 }
 
 #[cfg(test)]
-mod ipc_security_tests {
+mod linux_ipc_security_tests {
     use super::*;
     use std::{
         os::unix::fs::{PermissionsExt, symlink},
