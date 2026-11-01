@@ -1,21 +1,26 @@
 # Changelog
 
-## Unreleased — 19/08/2026
+## Unreleased — 31/10/2026
 
-- **Fixed:** `--quit` (and `--toggle`/`--show`/`--hide`/`--config`/`--reload`)
-  could report success while the daemon kept running, if the GTK main loop
-  was ever wedged. These commands ran via `GLib.idle_add` from the IPC
-  thread, which replied `{"ok": true}` before confirming the main loop
-  actually processed it. Root-caused live: a stale tray registration from
-  an old daemon caused the exact one-minute-unresponsive-click symptom
-  the 17/08 stall fix targeted, and `--quit` against that stuck daemon
-  silently did nothing. `quit` now runs a bounded (~3s) watchdog thread
-  that self-terminates the process directly if the main loop doesn't
-  confirm shutdown in time. Only ever exits itself, from itself -- no
-  PID/name targeting of any other process, so it doesn't reopen the
-  C-01/C-02 decoy-process hole. Verified in an isolated XDG environment
-  against a real session: normal quit unaffected (<1s, no warning
-  logged).
+- **Fixed:** generated app-menu and desktop-shortcut entries no longer use
+  `--daemon --no-ui`. Normal clicks now route through the default CLI
+  activation path, which opens settings for an existing daemon or starts it
+  with the settings window visible. XDG login autostart remains headless.
+- **Fixed:** the first CLI command after a stopped daemon no longer mistakes
+  the temporary "daemon is still starting up" IPC response for a failed
+  command. It retries until the daemon finishes wiring its GTK dispatcher,
+  which makes first-use `--toggle` reliable as well.
+- **Fixed:** `--quit` can no longer silently report success while the
+  daemon remains alive if the GTK main loop is wedged. The IPC server queues
+  the quit callback through `GLib.idle_add`; a bounded (~3s) watchdog now
+  self-terminates this process if the main loop never confirms shutdown.
+  This never signals another process by PID or name, preserving the
+  C-01/C-02 decoy-process safety. Normal quit remains unaffected (<1s).
+- **Known limitation:** `--toggle`, `--show`, `--hide`, `--config`,
+  `--reload`, `--set`, and `--restart` still acknowledge once their
+  callbacks are queued, not once the GTK main loop has applied them. If the
+  loop is wedged, these requests can be accepted but remain unapplied; this
+  needs a synchronous acknowledgement/health-check follow-up.
 
 ## v3.2.0 — Nobara/KDE hardening pass
 
@@ -73,8 +78,9 @@ H-xx) are from the static audit that preceded this pass.
   socket is unreachable — it never trusts a PID file.
 - **H-08 (SIGTERM skipped cleanup).** `SIGINT`/`SIGTERM` are handled via
   `GLib.unix_signal_add` and run the same clean-shutdown path as `--quit`
-  (stop IPC, release lock, exit). A second signal falls through to the
-  default OS handler as a force-quit escape hatch.
+  when the GTK main loop can dispatch them (stop IPC, release lock, exit).
+  A wedged main loop can starve these signal sources too; the CLI `--quit`
+  watchdog is the preferred recovery path in that situation.
 - **H-09 (tray backend order).** Ayatana `AppIndicator3` is tried first,
   then legacy `AppIndicator3`, then `Gtk.StatusIcon`. Absence of any of
   them is a warning, never a startup failure.

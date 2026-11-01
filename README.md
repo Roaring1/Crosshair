@@ -87,8 +87,11 @@ python3 crosshair.py --quit     # idempotent -- safe to call when not running
 out-of-range values are rejected outright (not silently clamped), and
 the command's exit code and stderr message tell you why.
 
-The settings window opens on launch by default; close it to minimize to
-tray (`--daemon --no-ui` skips opening it, e.g. for autostart).
+The settings window opens on launch by default; if the daemon is already
+running, launching the app opens its settings window. Close it to minimize
+to tray. Use `--daemon --no-ui` only for background startup (e.g. login
+autostart); generated app-menu and desktop shortcuts use the interactive
+launch so clicking them opens settings.
 
 ### Wayland hotkeys
 

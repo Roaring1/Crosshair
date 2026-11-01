@@ -22,23 +22,17 @@
 #   in dropdown, fix tray toggle not syncing checkbox, fix Gtk.Arrow
 #   deprecation, fix scale label layout, math.tau, ASCII section separators
 #
-# 19/08/2026 patch: fixed `--quit` (and toggle/show/hide/config/reload)
-#   silently no-oping if the GTK main loop is ever wedged. Those IPC
-#   commands are handled by scheduling the real work via GLib.idle_add
-#   from the IPC server thread, then immediately replying {"ok": True} --
-#   the reply never actually confirmed the main loop got around to running
-#   it. If the loop was stuck, `crosshair --quit` would report success and
-#   exit 0 while the daemon kept running forever, leaving a stale tray
-#   icon behind (this is what caused a real one-minute-unresponsive tray
-#   click, traced live on 19/08). The "quit" handler now starts a small
-#   watchdog thread that gives the main loop ~3s to actually flip
-#   should_quit, and self-terminates the process (os._exit) if it
-#   doesn't. This never signals any *other* process by PID or name -- it
-#   only ever exits itself from inside itself -- so it doesn't reopen the
-#   C-01/C-02 decoy-process hole removed in the 3.2.0 pass. Verified in
-#   an isolated XDG env against a real session: normal quit still
-#   completes in <1s with no warning logged; the watchdog path is a pure
-#   no-op unless the main loop is genuinely stuck.
+# 19/08/2026 patch: `--quit` no longer silently no-ops if the GTK
+#   main loop is wedged. IPC commands are queued with GLib.idle_add and
+#   normally acknowledge before the GTK callback executes. The "quit"
+#   handler therefore starts a watchdog thread that gives the main loop
+#   ~3s to flip should_quit, then self-terminates this process if it does
+#   not. Other UI/control commands (toggle/show/hide/config/reload/set/
+#   restart) still acknowledge when queued, not when applied; a wedged
+#   main loop can leave those requests unapplied. That is a known
+#   limitation, not covered by the quit watchdog. The watchdog never
+#   signals any *other* process by PID or name -- it only exits itself,
+#   preserving the C-01/C-02 decoy-process safety.
 
 import argparse
 import contextlib
@@ -100,11 +94,14 @@ def _sanitize_inplace(cfg: dict) -> dict:
 
 # --- installer / autostart (XDG-only, atomic, symlink-safe) -------------
 
-def _desktop_entry_exec(bin_path: Path) -> str:
+def _desktop_entry_exec(bin_path: Path, *, daemon: bool = False) -> str:
+    # A normal application launch must activate/show the settings window.
+    # Only the XDG autostart entry should start a hidden background daemon.
     # Desktop Entry Specification quoting: wrap in double quotes, escape
     # embedded backslashes/quotes.
     escaped = str(bin_path).replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}" --daemon --no-ui'
+    command = f'"{escaped}"'
+    return f"{command} --daemon --no-ui" if daemon else command
 
 def _validate_desktop_file(path: Path) -> None:
     exe = shutil.which("desktop-file-validate")
@@ -208,7 +205,7 @@ def install_autostart(paths: core.AppPaths, log: logging.Logger | None = None) -
         f"Name={APP_NAME}\n"
         "Comment=Crosshair overlay\n"
         f"TryExec={bin_path}\n"
-        f"Exec={_desktop_entry_exec(bin_path)}\n"
+        f"Exec={_desktop_entry_exec(bin_path, daemon=True)}\n"
         "Icon=input-gaming\n"
         "Terminal=false\n"
         "Categories=Utility;\n"
@@ -2050,8 +2047,9 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
 
     GLib.timeout_add(400, _poll_monitors)
 
-    # graceful shutdown on SIGINT/SIGTERM (item 17). A second signal falls
-    # through to the default Python/OS handler as a force-quit escape hatch.
+    # graceful shutdown on SIGINT/SIGTERM when the GLib main loop dispatches
+    # these sources. If that loop is wedged, signal delivery can be starved;
+    # use the IPC --quit watchdog before resorting to a verified manual signal.
     def _on_unix_signal(sig_num):
         log.info("Received signal %s; shutting down", sig_num)
         request_quit()
@@ -2236,10 +2234,19 @@ def main():
             for _ in range(80):
                 time.sleep(0.05)
                 try:
-                    response = core.ipc_call(paths, request)
-                    break
+                    candidate = core.ipc_call(paths, request)
                 except core.IpcUnavailable:
                     continue
+                # The daemon binds its socket before constructing GTK/tray
+                # state, so the first client can connect while the dispatcher
+                # is deliberately returning this temporary response. Treat
+                # it like an unavailable socket and retry instead of
+                # surfacing a spurious failure on the very first --toggle.
+                if (not candidate.get("ok") and
+                        candidate.get("message") == "daemon is still starting up"):
+                    continue
+                response = candidate
+                break
 
         if response is None:
             print("Could not contact daemon.", file=sys.stderr)

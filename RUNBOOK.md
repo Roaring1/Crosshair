@@ -45,11 +45,36 @@ throwaway directory so it never touched a real config.
   `--desktop-shortcut`, `--uninstall` (idempotent, config kept),
   `--purge-config`.
 
+## Target-machine checks performed — 31/10/2026
+
+On the user's Nobara/Plasma Wayland session:
+
+- Confirmed the real backend is Wayland with GTK Layer Shell and three
+  monitors; `--doctor` reports all required GTK/GDK/Cairo/layer-shell/tray
+  dependencies healthy.
+- Reproduced the old installed daemon at roughly 24–26% of one CPU core,
+  with tens of thousands of Wayland socket round-trips/context switches per
+  second. The installed copy was older than the repository. A fresh daemon
+  from current source idled at 0%; the refreshed live daemon also sampled
+  at 0% after restart.
+- Verified the identical `--toggle` command against the live daemon flips
+  OFF → ON → OFF. Also tested cold start with no daemon: first `--toggle`
+  starts the daemon and flips OFF → ON; the second flips ON → OFF.
+- Corrected the generated app-menu entry and the existing
+  `~/Desktop/crosshair.desktop` shortcut to launch the interactive settings
+  path (no `--daemon --no-ui`). Kept login autostart headless. All three
+  desktop files pass `desktop-file-validate`, and KDE's service cache was
+  rebuilt.
+- The actual KDE click-to-open/settings-window presentation, pointer
+  passthrough, multi-monitor visual placement, fullscreen/game compatibility,
+  sleep/resume and long-duration stability were not visually exercised.
+
 ## Needs your real machine
 
-These genuinely can't be verified without a real compositor, GPU driver,
-and games — Xvfb has no layer-shell protocol, no KWin, no fullscreen
-scanout path.
+These cannot be fully verified without the real compositor, GPU driver and
+games — Xvfb has no layer-shell protocol, no KWin, and no fullscreen scanout
+path. The launcher metadata is corrected, but the actual visible
+click-to-open result still needs a quick desktop check.
 
 ### 1. Native Plasma Wayland
 
@@ -113,9 +138,12 @@ cat /proc/<pid>/cmdline | tr '\0' ' '               # double-check
 ```
 
 Only if you've confirmed via `/proc/<pid>/cmdline` that it's genuinely
-the crosshair daemon and it's wedged should you send it a signal
-manually — and even then, prefer `SIGTERM` (which this build now handles
-cleanly) over `SIGKILL`.
+the crosshair daemon should you signal it manually. `SIGTERM` is routed
+through `GLib.unix_signal_add`, so it still depends on the GTK main loop
+being able to dispatch the signal callback. After trying `--quit`, send
+`SIGTERM` and wait a few seconds; if the exact same verified process is
+still present and remains wedged, `SIGKILL` may be necessary. Re-check
+`/proc/<pid>/cmdline` immediately before any force signal.
 
 ## Evidence to keep
 
