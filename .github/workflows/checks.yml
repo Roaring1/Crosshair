@@ -135,6 +135,9 @@ jobs:
       - name: Test Settings IPC failure and recovery
         run: bash tests/settings-ipc-recovery-smoke.sh
 
+      - name: Test Settings rapid edits during IPC socket replacement
+        run: bash tests/settings-ipc-restart-smoke.sh
+
       - name: Test Settings close and independent overlay lifetime
         run: xvfb-run -a bash tests/settings-close-smoke.sh
 
