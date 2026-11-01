@@ -18,7 +18,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-command -v cc >/dev/null || { echo "A C compiler is required for the X11 input probe." >&2; exit 2; }
+for tool in cc xprop xdotool; do
+    command -v "$tool" >/dev/null || {
+        echo "Required X11 smoke-test tool is missing: $tool" >&2
+        exit 2
+    }
+done
 cc "$SCRIPT_DIR/x11_input_probe.c" -o "$PROBE" -lX11 -lXext
 mkdir -p "$ROOT/home" "$ROOT/config" "$ROOT/state" "$ROOT/data" "$ROOT/runtime"
 chmod 700 "$ROOT/runtime"

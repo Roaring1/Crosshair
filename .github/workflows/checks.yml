@@ -96,7 +96,8 @@ jobs:
             libx11-dev \
             libxext-dev \
             xvfb \
-            xdotool
+            xdotool \
+            x11-utils
 
       - name: Set up stable Rust
         run: |
