@@ -739,9 +739,12 @@ fn enqueue_cli(
     error_prefix: &str,
     switch_to_general: bool,
 ) -> Result<(), String> {
-    // Cancel queued overlay work which would otherwise run after the
-    // installer/uninstaller has changed the executable pair.
-    apply_generation.fetch_add(1, Ordering::AcqRel);
+    // Only uninstall removes the executable pair, so only that command
+    // invalidates queued preview work. Autostart toggles are independent and
+    // must not cancel a pending auto-save or overlay update.
+    if action == "--uninstall" {
+        apply_generation.fetch_add(1, Ordering::AcqRel);
+    }
     let ui_id = ui_generation.fetch_add(1, Ordering::AcqRel) + 1;
     sender
         .send(SettingsTask::Cli {
@@ -1139,5 +1142,61 @@ mod tests {
         disabled.enabled = false;
 
         assert_eq!(preview_pixels(&enabled), preview_pixels(&disabled));
+    }
+
+    #[test]
+    fn only_uninstall_invalidates_pending_overlay_updates() {
+        let apply_generation = AtomicU64::new(7);
+        let ui_generation = AtomicU64::new(12);
+        let (sender, receiver) = mpsc::channel();
+
+        enqueue_cli(
+            &sender,
+            &apply_generation,
+            &ui_generation,
+            "--autostart",
+            "enabled",
+            "failed",
+            false,
+        )
+        .unwrap();
+        assert_eq!(apply_generation.load(Ordering::Acquire), 7);
+        assert_eq!(ui_generation.load(Ordering::Acquire), 13);
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            SettingsTask::Cli { action, .. } if action == "--autostart"
+        ));
+
+        enqueue_cli(
+            &sender,
+            &apply_generation,
+            &ui_generation,
+            "--remove-autostart",
+            "disabled",
+            "failed",
+            false,
+        )
+        .unwrap();
+        assert_eq!(apply_generation.load(Ordering::Acquire), 7);
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            SettingsTask::Cli { action, .. } if action == "--remove-autostart"
+        ));
+
+        enqueue_cli(
+            &sender,
+            &apply_generation,
+            &ui_generation,
+            "--uninstall",
+            "uninstalled",
+            "failed",
+            true,
+        )
+        .unwrap();
+        assert_eq!(apply_generation.load(Ordering::Acquire), 8);
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            SettingsTask::Cli { action, .. } if action == "--uninstall"
+        ));
     }
 }
