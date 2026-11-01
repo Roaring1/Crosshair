@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 *.pyo
+/target/
 .env
 .venv
 venv/

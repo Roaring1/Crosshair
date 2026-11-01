@@ -1,0 +1,442 @@
+import { Button, CheckBox, ComboBox, LineEdit, Slider, SpinBox, Switch, ScrollView, Palette } from "std-widgets.slint";
+
+export component SettingsWindow inherits Window {
+    title: "";
+    width: 560px;
+    height: root.active-tab == 0 && !root.shortcuts-expanded && !root.profile-panel-visible ? 250px : 420px;
+    animate height {
+        duration: 140ms;
+        easing: ease-in-out;
+    }
+    background: Palette.background;
+
+    in-out property <int> active-tab: 0;
+    in-out property <bool> enabled: true;
+    in-out property <bool> auto-save: true;
+    in-out property <string> monitor-selection: "All monitors";
+    in-out property <[string]> monitor-options: ["All monitors", "Primary monitor", "Cursor-active monitor"];
+    in-out property <string> shape: "dot";
+    in-out property <float> crosshair-opacity: 0.95;
+    in-out property <int> size: 5;
+    in-out property <int> thickness: 2;
+    in-out property <int> gap: 3;
+    in-out property <string> color-text: "#a000ff";
+    in-out property <color> preview-background: #222222;
+    in-out property <string> preview-background-text: "#222222";
+    in-out property <color> main-swatch: #a000ff;
+    in-out property <color> outline-swatch: #000000;
+    in-out property <color> shadow-swatch: #000000;
+    in-out property <color> reference-swatch: #a000ff;
+    in-out property <image> preview-image;
+
+    in-out property <bool> outline-enabled: true;
+    in-out property <bool> outline-expanded: false;
+    in-out property <string> outline-color-text: "#000000";
+    in-out property <float> outline-opacity: 0.8;
+    in-out property <int> outline-thickness: 1;
+
+    in-out property <bool> shadow-enabled: false;
+    in-out property <bool> shadow-expanded: false;
+    in-out property <string> shadow-color-text: "#000000";
+    in-out property <float> shadow-opacity: 0.35;
+    in-out property <int> shadow-x: 1;
+    in-out property <int> shadow-y: 1;
+
+    in-out property <bool> reference-enabled: false;
+    in-out property <bool> reference-expanded: false;
+    in-out property <string> reference-color-text: "#a000ff";
+    in-out property <float> reference-opacity: 0.95;
+    in-out property <int> reference-size: 3;
+    in-out property <int> reference-x: 0;
+    in-out property <int> reference-y: 64;
+
+    in-out property <int> offset-x: 0;
+    in-out property <int> offset-y: 0;
+
+    in-out property <bool> shortcuts-expanded: false;
+    in-out property <bool> profile-panel-visible: false;
+    in-out property <bool> profile-is-export: false;
+    in-out property <string> profile-code: "";
+    in-out property <string> profile-feedback: "";
+
+    callback settings_changed();
+    callback save_requested();
+    callback reset_requested();
+    callback import_profile(string);
+    callback export_profile();
+    callback open_config_folder();
+    callback reload_config();
+    callback install_autostart();
+    callback remove_autostart();
+    callback refresh_monitors();
+    callback uninstall_app();
+
+
+    system-menu := PopupWindow {
+        x: root.width - self.width - 12px;
+        y: 38px;
+        width: 188px;
+        height: 210px;
+        Rectangle {
+            background: Palette.background;
+            width: 100%;
+            height: 100%;
+            VerticalLayout {
+            padding: 7px;
+            spacing: 3px;
+            Button { text: "Import crosshair code"; clicked => {
+                root.profile-code = "";
+                root.profile-is-export = false;
+                root.profile-feedback = "";
+                root.profile-panel-visible = true;
+                system-menu.close();
+            } }
+            Button { text: "Export crosshair code"; clicked => {
+                root.profile-is-export = true;
+                root.profile-feedback = "";
+                root.export_profile();
+                root.profile-panel-visible = true;
+                system-menu.close();
+            } }
+            Rectangle { height: 1px; background: Palette.border; }
+            Button { text: "Open config folder"; clicked => { root.open_config_folder(); system-menu.close(); } }
+            Button { text: "Reload config"; clicked => { root.reload_config(); system-menu.close(); } }
+            Button { text: "Refresh monitors"; clicked => { root.refresh_monitors(); system-menu.close(); } }
+            Button { text: "Uninstall"; clicked => { root.uninstall_app(); system-menu.close(); } }
+            }
+        }
+    }
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+
+        HorizontalLayout {
+            height: 32px;
+            spacing: 4px;
+            Button {
+                text: "General";
+                checkable: true;
+                checked: root.active-tab == 0;
+                clicked => { root.active-tab = 0; }
+            }
+            Button {
+                text: "Appearance";
+                checkable: true;
+                checked: root.active-tab == 1;
+                clicked => { root.active-tab = 1; }
+            }
+            HorizontalLayout { }
+            Button {
+                text: "System";
+                clicked => { system-menu.show(); }
+            }
+        }
+
+        Rectangle { height: 1px; background: Palette.border; }
+
+        if root.profile-panel-visible: Rectangle {
+            border-color: Palette.border;
+            border-width: 1px;
+            border-radius: 4px;
+            background: Palette.alternate-background;
+            height: 106px;
+            VerticalLayout {
+                padding: 8px;
+                spacing: 5px;
+                HorizontalLayout {
+                    Text {
+                        text: root.profile-is-export ? "Crosshair code" : "Import crosshair code";
+                        vertical-alignment: center;
+                        font-weight: 600;
+                    }
+                    HorizontalLayout { }
+                    Button { text: "Close"; clicked => { root.profile-panel-visible = false; } }
+                }
+                profile_code_field := LineEdit {
+                    text <=> root.profile-code;
+                    placeholder-text: "CH1- paste or copy the code";
+                    width: 100%;
+                    read-only: root.profile-is-export;
+                    accepted => { root.import_profile(root.profile-code); }
+                }
+                HorizontalLayout {
+                    Text {
+                        text: root.profile-feedback;
+                        color: Palette.foreground;
+                        vertical-alignment: center;
+                    }
+                    HorizontalLayout { }
+                    if root.profile-is-export: Button { text: "Copy code"; primary: true; clicked => { profile_code_field.select-all(); profile_code_field.copy(); root.profile-feedback = "Copied to clipboard"; } }
+                    if !root.profile-is-export: Button {
+                        text: "Apply code";
+                        primary: true;
+                        clicked => { root.import_profile(root.profile-code); }
+                    }
+                }
+            }
+        }
+
+        if root.active-tab == 0: ScrollView {
+            width: 100%;
+            height: 100%;
+            VerticalLayout {
+                spacing: 6px;
+                padding: 4px;
+
+                HorizontalLayout {
+                    height: 30px;
+                    Switch {
+                        text: "Enabled";
+                        checked <=> root.enabled;
+                        toggled => { root.settings_changed(); }
+                    }
+                    HorizontalLayout { }
+                    Switch {
+                        text: "Auto-save";
+                        checked <=> root.auto-save;
+                        toggled => { root.settings_changed(); }
+                    }
+                }
+
+                HorizontalLayout {
+                    height: 32px;
+                    Text { text: "Monitor"; vertical-alignment: center; width: 82px; }
+                    ComboBox {
+                        model: root.monitor-options;
+                        current-value <=> root.monitor-selection;
+                        selected(value) => { root.monitor-selection = value; root.settings_changed(); }
+                        horizontal-stretch: 1;
+                        height: 28px;
+                    }
+                }
+
+                HorizontalLayout {
+                    height: 30px;
+                    Button { text: "Reset"; width: 90px; height: 28px; clicked => { root.reset_requested(); } }
+                    if !root.auto-save: Button { text: "Save"; width: 90px; height: 28px; primary: true; clicked => { root.save_requested(); } }
+                }
+
+                Rectangle { height: 1px; background: Palette.border; }
+
+                HorizontalLayout {
+                    height: 28px;
+                    Text { text: "Shortcuts and startup"; font-weight: 600; vertical-alignment: center; }
+                    HorizontalLayout { }
+                    Button {
+                        text: root.shortcuts-expanded ? "Hide" : "Show";
+                        width: 64px;
+                        height: 26px;
+                        clicked => { root.shortcuts-expanded = !root.shortcuts-expanded; }
+                    }
+                }
+
+                if root.shortcuts-expanded: VerticalLayout {
+                    spacing: 7px;
+                    Text {
+                        text: "Wayland does not allow ordinary apps to capture global hotkeys. Create a desktop shortcut that runs this command:";
+                        wrap: word-wrap;
+                    }
+                    Rectangle {
+                        background: Palette.alternate-background;
+                        border-radius: 3px;
+                        height: 34px;
+                        HorizontalLayout {
+                            padding: 7px;
+                            toggle_command_field := LineEdit { text: "crosshair --toggle"; read-only: true; }
+                            HorizontalLayout { }
+                            Button { text: "Copy"; clicked => { toggle_command_field.select-all(); toggle_command_field.copy(); } }
+                        }
+                    }
+                    Text { text: "Optional login startup"; font-weight: 600; }
+                    HorizontalLayout {
+                        Button { text: "Install autostart"; clicked => { root.install_autostart(); } }
+                        Button { text: "Remove autostart"; clicked => { root.remove_autostart(); } }
+                    }
+                }
+            }
+        }
+
+        if root.active-tab == 1: HorizontalLayout {
+            spacing: 14px;
+            height: 100%;
+
+            ScrollView {
+                width: 318px;
+                height: 100%;
+                VerticalLayout {
+                    spacing: 7px;
+                    padding: 3px;
+
+                    HorizontalLayout {
+                        Text { text: "Shape"; width: 82px; vertical-alignment: center; }
+                        ComboBox {
+                            model: ["dot", "cross", "x", "plus", "ring", "dot_ring", "cross_dot", "x_dot"];
+                            current-value <=> root.shape;
+                            selected(value) => { root.shape = value; root.settings_changed(); }
+                            horizontal-stretch: 1;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        Text { text: "Opacity"; width: 82px; vertical-alignment: center; }
+                        Slider { minimum: 0.05; maximum: 1; step: 0.01; value <=> root.crosshair-opacity; changed(value) => { root.settings_changed(); } }
+                    }
+                    HorizontalLayout {
+                        Text { text: "Size"; width: 82px; vertical-alignment: center; }
+                        Slider { minimum: 1; maximum: 200; step: 1; value: root.size; changed(value) => { root.size = round(value); root.settings_changed(); } }
+                        SpinBox { minimum: 1; maximum: 200; value <=> root.size; edited => { root.settings_changed(); } }
+                    }
+                    HorizontalLayout {
+                        Text { text: "Thickness"; width: 82px; vertical-alignment: center; }
+                        Slider { minimum: 1; maximum: 100; step: 1; value: root.thickness; changed(value) => { root.thickness = round(value); root.settings_changed(); } }
+                        SpinBox { minimum: 1; maximum: 100; value <=> root.thickness; edited => { root.settings_changed(); } }
+                    }
+                    HorizontalLayout {
+                        Text { text: "Gap"; width: 82px; vertical-alignment: center; }
+                        Slider { minimum: 0; maximum: 200; step: 1; value: root.gap; changed(value) => { root.gap = round(value); root.settings_changed(); } }
+                        SpinBox { minimum: 0; maximum: 200; value <=> root.gap; edited => { root.settings_changed(); } }
+                    }
+
+                    HorizontalLayout {
+                        Text { text: "Color"; width: 82px; vertical-alignment: center; }
+                        Rectangle { width: 18px; height: 18px; background: root.main-swatch; border-color: Palette.border; border-width: 1px; border-radius: 3px; }
+                        LineEdit { text <=> root.color-text; placeholder-text: "#RRGGBB"; accepted => { root.settings_changed(); } }
+                    }
+
+                    Rectangle { height: 1px; background: Palette.border; }
+
+                    Button {
+                        text: root.outline-expanded ? "Outline" : "Outline";
+                        checkable: true;
+                        checked: root.outline-enabled;
+                        clicked => { root.outline-enabled = self.checked; root.settings_changed(); root.outline-expanded = !root.outline-expanded; }
+                    }
+                    if root.outline-expanded: VerticalLayout {
+                        spacing: 5px;
+                        HorizontalLayout {
+                            Text { text: "Color"; width: 82px; }
+                            Rectangle { width: 18px; height: 18px; background: root.outline-swatch; border-color: Palette.border; border-width: 1px; border-radius: 3px; }
+                            LineEdit { text <=> root.outline-color-text; accepted => { root.settings_changed(); } }
+                        }
+                        HorizontalLayout {
+                            Text { text: "Opacity"; width: 82px; }
+                            Slider { minimum: 0; maximum: 1; step: 0.01; value <=> root.outline-opacity; changed(value) => { root.settings_changed(); } }
+                        }
+                        HorizontalLayout {
+                            Text { text: "Thickness"; width: 82px; }
+                            SpinBox { minimum: 0; maximum: 100; value <=> root.outline-thickness; edited => { root.settings_changed(); } }
+                        }
+                    }
+
+                    Button {
+                        text: "Shadow";
+                        checkable: true;
+                        checked: root.shadow-enabled;
+                        clicked => { root.shadow-enabled = self.checked; root.settings_changed(); root.shadow-expanded = !root.shadow-expanded; }
+                    }
+                    if root.shadow-expanded: VerticalLayout {
+                        spacing: 5px;
+                        HorizontalLayout {
+                            Text { text: "Color"; width: 82px; }
+                            Rectangle { width: 18px; height: 18px; background: root.shadow-swatch; border-color: Palette.border; border-width: 1px; border-radius: 3px; }
+                            LineEdit { text <=> root.shadow-color-text; accepted => { root.settings_changed(); } }
+                        }
+                        HorizontalLayout {
+                            Text { text: "Opacity"; width: 82px; }
+                            Slider { minimum: 0; maximum: 1; step: 0.01; value <=> root.shadow-opacity; changed(value) => { root.settings_changed(); } }
+                        }
+                        HorizontalLayout {
+                            Text { text: "Offset X"; width: 82px; }
+                            SpinBox { minimum: -200; maximum: 200; value <=> root.shadow-x; edited => { root.settings_changed(); } }
+                        }
+                        HorizontalLayout {
+                            Text { text: "Offset Y"; width: 82px; }
+                            SpinBox { minimum: -200; maximum: 200; value <=> root.shadow-y; edited => { root.settings_changed(); } }
+                        }
+                    }
+
+                    Button {
+                        text: "Second dot";
+                        checkable: true;
+                        checked: root.reference-enabled;
+                        clicked => { root.reference-enabled = self.checked; root.settings_changed(); root.reference-expanded = !root.reference-expanded; }
+                    }
+                    if root.reference-expanded: VerticalLayout {
+                        spacing: 5px;
+                        Text {
+                            text: "A separate reference point, for recoil or off-center aiming practice.";
+                            color: Palette.foreground;
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            Text { text: "Color"; width: 82px; }
+                            Rectangle { width: 18px; height: 18px; background: root.reference-swatch; border-color: Palette.border; border-width: 1px; border-radius: 3px; }
+                            LineEdit { text <=> root.reference-color-text; accepted => { root.settings_changed(); } }
+                        }
+                        HorizontalLayout {
+                            Text { text: "Size"; width: 82px; }
+                            SpinBox { minimum: 1; maximum: 100; value <=> root.reference-size; edited => { root.settings_changed(); } }
+                        }
+                        HorizontalLayout {
+                            Text { text: "Opacity"; width: 82px; }
+                            Slider { minimum: 0; maximum: 1; step: 0.01; value <=> root.reference-opacity; changed(value) => { root.settings_changed(); } }
+                        }
+                        HorizontalLayout {
+                            Text { text: "Offset X"; width: 82px; }
+                            SpinBox { minimum: -500; maximum: 500; value <=> root.reference-x; edited => { root.settings_changed(); } }
+                        }
+                        HorizontalLayout {
+                            Text { text: "Offset Y"; width: 82px; }
+                            SpinBox { minimum: -500; maximum: 500; value <=> root.reference-y; edited => { root.settings_changed(); } }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        Text { text: "Position X"; width: 82px; vertical-alignment: center; }
+                        SpinBox { minimum: -500; maximum: 500; value <=> root.offset-x; edited => { root.settings_changed(); } }
+                    }
+                    HorizontalLayout {
+                        Text { text: "Position Y"; width: 82px; vertical-alignment: center; }
+                        SpinBox { minimum: -500; maximum: 500; value <=> root.offset-y; edited => { root.settings_changed(); } }
+                    }
+                }
+            }
+
+            Rectangle { width: 1px; background: Palette.border; }
+
+            VerticalLayout {
+                width: 168px;
+                spacing: 6px;
+                Text { text: "Preview"; font-weight: 600; height: 22px; }
+                Rectangle {
+                    background: root.preview-background;
+                    border-radius: 4px;
+                    border-color: Palette.border;
+                    border-width: 1px;
+                    width: 100%;
+                    height: 168px;
+                    clip: true;
+                    Image {
+                        source: root.preview-image;
+                        image-fit: contain;
+                        width: 100%;
+                        height: 100%;
+                    }
+                }
+                HorizontalLayout {
+                    height: 28px;
+                    Text { text: "Background"; vertical-alignment: center; }
+                    Rectangle { width: 22px; height: 20px; background: root.preview-background; border-color: Palette.border; border-width: 1px; border-radius: 3px; }
+                    LineEdit { text <=> root.preview-background-text; accepted => { root.settings_changed(); } }
+                }
+                Button {
+                    text: "Share code";
+                    height: 30px;
+                    primary: true;
+                    clicked => { root.profile-is-export = true; root.export_profile(); root.profile-panel-visible = true; }
+                }
+            }
+        }
+    }
+}

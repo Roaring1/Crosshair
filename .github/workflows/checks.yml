@@ -2,7 +2,7 @@ name: Crosshair checks
 
 on:
   push:
-    branches: [main]
+    branches: [main, rust-port]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -74,3 +74,66 @@ jobs:
 
       - name: Audit all pinned development dependencies
         run: pip-audit -r requirements-audit.txt
+
+  rust:
+    name: Rust / Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install native build and headless-test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libfontconfig1-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libx11-dev \
+            libxext-dev \
+            xvfb \
+            xdotool
+
+      - name: Set up stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Test Rust core, renderer and Settings UI
+        run: cargo test --locked --features settings-ui --all-targets
+
+      - name: Build the Linux executables
+        run: cargo build --locked --features settings-ui --bins
+
+      - name: Test X11 click-through and cold-start lifecycle
+        run: xvfb-run -a bash tests/x11-smoke.sh
+
+      - name: Test Settings close and independent overlay lifetime
+        run: xvfb-run -a bash tests/settings-close-smoke.sh
+
+  rust-windows-compile:
+    name: Rust compile / Windows
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up stable Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+
+      - name: Compile shared core, Settings UI and Windows adapters
+        run: cargo check --locked --features settings-ui --bins
