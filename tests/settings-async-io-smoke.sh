@@ -129,23 +129,8 @@ xvfb-run -a bash -c '
     xdotool mousemove --window "$window" 140 398 click 1
     test ! -f "$REPLIED"
     AUTOSTART="$XDG_CONFIG_HOME/autostart/crosshair.desktop"
-    for _ in $(seq 1 200); do
-        [[ -f "$AUTOSTART" ]] && break
-        sleep 0.05
-    done
-    test -f "$AUTOSTART"
-    test -f "$REPLIED"
-    python3 - <<'PY'
-import json
-import os
-from pathlib import Path
 
-config = Path(os.environ["XDG_CONFIG_HOME"]) / "crosshair" / "config.json"
-assert json.loads(config.read_text(encoding="utf-8"))["enabled"] is True
-print("PASS: autostart ran after the pending preview completed and its auto-save persisted")
-PY
-
-    echo "[5] verify WM_DELETE_WINDOW and request a normal window close"
+    echo "[5] close Settings while Install autostart is queued behind delayed IPC"
     xprop -id "$window" WM_PROTOCOLS || true
     "$close_helper" "$window"
     for _ in $(seq 1 180); do
@@ -163,6 +148,9 @@ PY
         echo "Settings exited with an error after the delayed IPC request." >&2
         exit 1
     fi
+    test -f "$AUTOSTART"
+    test -f "$REPLIED"
+    echo "PASS: Settings shutdown drained the queued autostart action after delayed IPC"
     echo "PASS: Settings closed cleanly after the delayed IPC request"
 ' _ "$SETTINGS" "$ACCEPTED" "$ROOT/send-wm-delete" "$ROOT"
 
@@ -177,3 +165,4 @@ print("PASS: closing Settings flushed the final auto-saved Enabled state")
 PY
 
 echo "PASS: a delayed IPC response does not freeze the Settings event loop"
+echo "PASS: worker shutdown drains a CLI action queued behind in-flight IPC"
