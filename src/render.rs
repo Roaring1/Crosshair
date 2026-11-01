@@ -64,9 +64,40 @@ impl Bounds {
 }
 
 pub fn render_crosshair(config: &Config) -> Result<Raster, CoreError> {
-    let mut c = config.clone();
-    c.normalize();
+    let mut normalized = config.clone();
+    normalized.normalize();
+    render_normalized(&normalized)
+}
 
+/// Render a normalized user configuration at a bounded physical-pixel scale.
+///
+/// Validation happens before scaling. Do not normalize the scaled values again:
+/// they intentionally exceed the logical UI limits on HiDPI outputs.
+pub fn render_crosshair_scaled(config: &Config, scale: u32) -> Result<Raster, CoreError> {
+    let mut scaled = config.clone();
+    scaled.normalize();
+    scale_normalized_config(&mut scaled, scale);
+    render_normalized(&scaled)
+}
+
+fn scale_normalized_config(config: &mut Config, scale: u32) {
+    let factor = scale.clamp(1, 4) as u16;
+    let signed_factor = factor as i16;
+
+    config.size = config.size.saturating_mul(factor);
+    config.thickness = config.thickness.saturating_mul(factor);
+    config.gap = config.gap.saturating_mul(factor);
+    config.offset_x = config.offset_x.saturating_mul(signed_factor);
+    config.offset_y = config.offset_y.saturating_mul(signed_factor);
+    config.outline.thickness = config.outline.thickness.saturating_mul(factor);
+    config.shadow.offset_x = config.shadow.offset_x.saturating_mul(signed_factor);
+    config.shadow.offset_y = config.shadow.offset_y.saturating_mul(signed_factor);
+    config.reference_dot.size = config.reference_dot.size.saturating_mul(factor);
+    config.reference_dot.offset_x = config.reference_dot.offset_x.saturating_mul(signed_factor);
+    config.reference_dot.offset_y = config.reference_dot.offset_y.saturating_mul(signed_factor);
+}
+
+fn render_normalized(c: &Config) -> Result<Raster, CoreError> {
     let stroke = c.thickness as f32;
     let outline = if c.outline.enabled {
         c.outline.thickness as f32
@@ -531,6 +562,74 @@ mod tests {
         assert_eq!(
             (compact.width, compact.height),
             (unchanged.width, unchanged.height)
+        );
+    }
+
+    #[test]
+    fn scaled_config_is_validated_before_hidpi_multiplication() {
+        let mut config = Config::default();
+        config.shape = "x_dot".into();
+        config.size = u16::MAX;
+        config.thickness = u16::MAX;
+        config.gap = u16::MAX;
+        config.offset_x = i16::MAX;
+        config.offset_y = i16::MIN;
+        config.outline.thickness = u16::MAX;
+        config.shadow.offset_x = i16::MAX;
+        config.shadow.offset_y = i16::MIN;
+        config.reference_dot.enabled = true;
+        config.reference_dot.size = u16::MAX;
+        config.reference_dot.offset_x = i16::MAX;
+        config.reference_dot.offset_y = i16::MIN;
+
+        let scaled = {
+            let mut normalized = config.clone();
+            normalized.normalize();
+            scale_normalized_config(&mut normalized, 2);
+            normalized
+        };
+
+        assert_eq!(scaled.size, 400);
+        assert_eq!(scaled.thickness, 200);
+        assert_eq!(scaled.gap, 400);
+        assert_eq!(scaled.offset_x, 1_000);
+        assert_eq!(scaled.offset_y, -1_000);
+        assert_eq!(scaled.outline.thickness, 200);
+        assert_eq!(scaled.shadow.offset_x, 400);
+        assert_eq!(scaled.shadow.offset_y, -400);
+        assert_eq!(scaled.reference_dot.size, 200);
+        assert_eq!(scaled.reference_dot.offset_x, 1_000);
+        assert_eq!(scaled.reference_dot.offset_y, -1_000);
+    }
+
+    #[test]
+    fn scaled_renderer_preserves_maximum_logical_size_on_hidpi_outputs() {
+        let mut config = Config::default();
+        config.size = 200;
+        config.outline.enabled = false;
+        config.shadow.enabled = false;
+        config.offset_x = 500;
+        config.offset_y = -500;
+
+        let logical = render_crosshair(&config).unwrap();
+        let physical = render_crosshair_scaled(&config, 2).unwrap();
+
+        assert!(physical.width > logical.width * 19 / 10);
+        assert!(physical.height > logical.height * 19 / 10);
+        assert!((physical.origin_x - logical.origin_x * 2).abs() <= 2);
+        assert!((physical.origin_y - logical.origin_y * 2).abs() <= 2);
+    }
+
+    #[test]
+    fn hidpi_scale_is_bounded_and_zero_means_one() {
+        let config = Config::default();
+        assert_eq!(
+            render_crosshair_scaled(&config, 0).unwrap(),
+            render_crosshair_scaled(&config, 1).unwrap()
+        );
+        assert_eq!(
+            render_crosshair_scaled(&config, 99).unwrap(),
+            render_crosshair_scaled(&config, 4).unwrap()
         );
     }
 

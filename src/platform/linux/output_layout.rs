@@ -1,5 +1,5 @@
 use crosshair_core::Config;
-use crosshair_core::render::{Raster, render_crosshair};
+use crosshair_core::render::{Raster, render_crosshair_scaled};
 use smithay_client_toolkit::output::OutputInfo;
 
 pub struct OutputLayout {
@@ -13,55 +13,58 @@ pub struct OutputLayout {
 }
 
 pub fn build(config: &Config, info: &OutputInfo) -> Result<OutputLayout, String> {
-    let (width, height) = info
-        .logical_size
+    let current_mode = info
+        .modes
+        .iter()
+        .find(|mode| mode.current)
+        .map(|mode| mode.dimensions);
+    build_from_metadata(
+        config,
+        info.id,
+        info.name.as_deref(),
+        info.logical_size,
+        current_mode,
+        info.scale_factor,
+    )
+}
+
+fn build_from_metadata(
+    config: &Config,
+    output_id: u32,
+    output_name: Option<&str>,
+    logical_size: Option<(i32, i32)>,
+    current_mode: Option<(i32, i32)>,
+    output_scale: i32,
+) -> Result<OutputLayout, String> {
+    let (width, height) = logical_size
         .or_else(|| {
-            info.modes.iter().find(|mode| mode.current).map(|mode| {
-                let scale = info.scale_factor.max(1);
-                (mode.dimensions.0 / scale, mode.dimensions.1 / scale)
+            current_mode.map(|(physical_width, physical_height)| {
+                let reported_scale = output_scale.max(1);
+                (
+                    physical_width / reported_scale,
+                    physical_height / reported_scale,
+                )
             })
         })
         .ok_or_else(|| {
             format!(
                 "Could not determine logical dimensions for output {}",
-                info.name.as_deref().unwrap_or("unknown")
+                output_name.unwrap_or("unknown")
             )
         })?;
     if width <= 0 || height <= 0 {
         return Err(format!(
             "Output {} reported invalid dimensions",
-            info.name.as_deref().unwrap_or("unknown")
+            output_name.unwrap_or("unknown")
         ));
     }
 
-    let name = info
-        .name
-        .clone()
+    let name = output_name
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| format!("Output {}", info.id));
-    let scale = info.scale_factor.clamp(1, 4) as u32;
-    let mut scaled = config.clone();
-    scaled.size = scaled.size.saturating_mul(scale as u16).min(800);
-    scaled.thickness = scaled.thickness.saturating_mul(scale as u16).min(400);
-    scaled.gap = scaled.gap.saturating_mul(scale as u16).min(800);
-    scaled.offset_x = scaled.offset_x.saturating_mul(scale as i16);
-    scaled.offset_y = scaled.offset_y.saturating_mul(scale as i16);
-    scaled.outline.thickness = scaled
-        .outline
-        .thickness
-        .saturating_mul(scale as u16)
-        .min(200);
-    scaled.shadow.offset_x = scaled.shadow.offset_x.saturating_mul(scale as i16);
-    scaled.shadow.offset_y = scaled.shadow.offset_y.saturating_mul(scale as i16);
-    scaled.reference_dot.size = scaled
-        .reference_dot
-        .size
-        .saturating_mul(scale as u16)
-        .min(400);
-    scaled.reference_dot.offset_x = scaled.reference_dot.offset_x.saturating_mul(scale as i16);
-    scaled.reference_dot.offset_y = scaled.reference_dot.offset_y.saturating_mul(scale as i16);
-
-    let raster = render_crosshair(&scaled).map_err(|error| error.to_string())?;
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("Output {output_id}"));
+    let scale = output_scale.clamp(1, 4) as u32;
+    let raster = render_crosshair_scaled(config, scale).map_err(|error| error.to_string())?;
     let logical_width = raster.width.div_ceil(scale);
     let logical_height = raster.height.div_ceil(scale);
     let x_origin = raster.origin_x / scale as i32;
@@ -78,4 +81,78 @@ pub fn build(config: &Config, info: &OutputInfo) -> Result<OutputLayout, String>
         top: (height / 2) + y_origin,
         left: (width / 2) + x_origin,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefers_compositor_logical_size_and_uses_scaled_rendering() {
+        let mut config = Config::default();
+        config.size = 200;
+        config.outline.enabled = false;
+        config.shadow.enabled = false;
+
+        let layout = build_from_metadata(
+            &config,
+            2,
+            Some("DP-1"),
+            Some((1920, 1080)),
+            Some((3840, 2160)),
+            2,
+        )
+        .unwrap();
+        let logical_raster = crosshair_core::render::render_crosshair(&config).unwrap();
+
+        assert_eq!(layout.name, "DP-1");
+        assert_eq!(layout.scale, 2);
+        assert!(layout.raster.width > logical_raster.width * 19 / 10);
+        assert!(layout.raster.height > logical_raster.height * 19 / 10);
+        assert_eq!(layout.logical_width, layout.raster.width.div_ceil(2));
+        assert_eq!(layout.logical_height, layout.raster.height.div_ceil(2));
+        assert_eq!(layout.left, 1920 / 2 + layout.raster.origin_x / 2);
+        assert_eq!(layout.top, 1080 / 2 + layout.raster.origin_y / 2);
+    }
+
+    #[test]
+    fn falls_back_to_current_mode_divided_by_reported_scale() {
+        let layout =
+            build_from_metadata(&Config::default(), 7, None, None, Some((3840, 2160)), 2).unwrap();
+
+        assert_eq!(layout.name, "Output 7");
+        assert_eq!(layout.scale, 2);
+        assert_eq!(layout.left, 1920 / 2 + layout.raster.origin_x / 2);
+        assert_eq!(layout.top, 1080 / 2 + layout.raster.origin_y / 2);
+    }
+
+    #[test]
+    fn invalid_or_missing_output_dimensions_fail_closed() {
+        assert!(
+            build_from_metadata(
+                &Config::default(),
+                1,
+                Some("DP-1"),
+                Some((0, 1080)),
+                Some((3840, 2160)),
+                2,
+            )
+            .is_err()
+        );
+        assert!(build_from_metadata(&Config::default(), 1, None, None, None, 1).is_err());
+    }
+
+    #[test]
+    fn buffer_scale_is_bounded_even_when_output_reports_an_extreme_value() {
+        let layout = build_from_metadata(
+            &Config::default(),
+            1,
+            Some("DP-1"),
+            Some((1920, 1080)),
+            None,
+            16,
+        )
+        .unwrap();
+        assert_eq!(layout.scale, 4);
+    }
 }
