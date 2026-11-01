@@ -2,7 +2,7 @@ use crosshair_core::render::{Raster, render_crosshair};
 use crosshair_core::{APP_VERSION, AppPaths, Config};
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufReader, Write},
     os::fd::AsRawFd,
     os::unix::net::UnixStream,
     time::Duration,
@@ -594,17 +594,8 @@ fn handle_request(mut stream: UnixStream, runtime: &mut X11Runtime) -> Result<()
     }
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
-    let mut line = Vec::with_capacity(1024);
-    {
-        let reader = BufReader::new(&stream);
-        reader
-            .take(64 * 1024)
-            .read_until(b'\n', &mut line)
-            .map_err(|error| format!("Could not read IPC request: {error}"))?;
-    }
-    if line.len() > 64 * 1024 {
-        return Err("IPC request exceeds 64 KiB".into());
-    }
+    let line = crosshair_core::read_bounded_line(BufReader::new(&stream))
+        .map_err(|error| format!("Could not read IPC request: {error}"))?;
     let request: serde_json::Value =
         serde_json::from_slice(&line).map_err(|_| "Invalid JSON in IPC request".to_string())?;
     let command = request

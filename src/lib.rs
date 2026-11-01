@@ -30,6 +30,34 @@ pub enum CoreError {
     Json(#[from] serde_json::Error),
 }
 
+pub const MAX_IPC_MESSAGE_BYTES: usize = 64 * 1024;
+
+/// Read one bounded newline-delimited IPC message.
+///
+/// The extra byte distinguishes a full, valid-size message from an oversized
+/// message even when the delimiter has not arrived yet. EOF without a newline
+/// is rejected so callers never parse a truncated frame as a complete request.
+pub fn read_bounded_line<R: std::io::BufRead>(reader: R) -> std::io::Result<Vec<u8>> {
+    use std::io::BufRead;
+
+    let mut line = Vec::with_capacity(1024);
+    let mut reader = reader.take((MAX_IPC_MESSAGE_BYTES + 1) as u64);
+    reader.read_until(b'\n', &mut line)?;
+    if line.len() > MAX_IPC_MESSAGE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "IPC message exceeds 64 KiB",
+        ));
+    }
+    if line.last() != Some(&b'\n') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "IPC message is missing its newline delimiter",
+        ));
+    }
+    Ok(line)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
@@ -1447,5 +1475,55 @@ mod tests {
             std::fs::metadata(&path).unwrap().len(),
             (MAX_CONFIG_BYTES + 1) as u64
         );
+    }
+}
+
+#[cfg(test)]
+mod ipc_framing_tests {
+    use super::{MAX_IPC_MESSAGE_BYTES, read_bounded_line};
+    use std::io::Cursor;
+
+    #[test]
+    fn accepts_a_bounded_newline_terminated_request() {
+        let request = br#"{"cmd":"status"}"#.to_vec();
+        let mut expected = request;
+        expected.push(b'\n');
+
+        assert_eq!(
+            read_bounded_line(Cursor::new(expected.clone())).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn accepts_a_request_exactly_at_the_size_limit() {
+        let mut request = br#"{"cmd":"status"}"#.to_vec();
+        request.resize(MAX_IPC_MESSAGE_BYTES - 1, b' ');
+        request.push(b'\n');
+        assert_eq!(request.len(), MAX_IPC_MESSAGE_BYTES);
+
+        assert_eq!(
+            read_bounded_line(Cursor::new(request.clone())).unwrap(),
+            request
+        );
+    }
+
+    #[test]
+    fn rejects_an_oversized_request_even_when_its_json_prefix_is_valid() {
+        let mut request = br#"{"cmd":"status"}"#.to_vec();
+        request.resize(MAX_IPC_MESSAGE_BYTES + 1, b' ');
+
+        let error = read_bounded_line(Cursor::new(request)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("exceeds 64 KiB"));
+    }
+
+    #[test]
+    fn rejects_a_complete_json_object_without_its_newline_delimiter() {
+        let request = br#"{"cmd":"status"}"#.to_vec();
+
+        let error = read_bounded_line(Cursor::new(request)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("missing its newline delimiter"));
     }
 }

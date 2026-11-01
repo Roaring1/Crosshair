@@ -12,7 +12,7 @@ use crosshair_core::{
     validate_user_file_targets,
 };
 #[cfg(unix)]
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Write};
 use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -36,19 +36,15 @@ fn send_command(
         request["payload"] = payload;
     }
     let mut bytes = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
-    if bytes.len() >= 64 * 1024 {
+    if bytes.len() >= crosshair_core::MAX_IPC_MESSAGE_BYTES {
         return Err("Control request exceeds 64 KiB".into());
     }
     bytes.push(b'\n');
     stream
         .write_all(&bytes)
         .map_err(|error| error.to_string())?;
-    let reader = BufReader::new(stream);
-    let mut response = Vec::with_capacity(512);
-    reader
-        .take(64 * 1024)
-        .read_until(b'\n', &mut response)
-        .map_err(|error| error.to_string())?;
+    let response = crosshair_core::read_bounded_line(BufReader::new(stream))
+        .map_err(|error| format!("Invalid response from overlay: {error}"))?;
     let response: serde_json::Value = serde_json::from_slice(&response)
         .map_err(|error| format!("Invalid response from overlay: {error}"))?;
     if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {

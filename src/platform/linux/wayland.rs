@@ -20,7 +20,7 @@ use smithay_client_toolkit::{
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufReader, Write},
     os::unix::{
         fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
         net::{UnixListener, UnixStream},
@@ -580,17 +580,8 @@ fn handle_request(mut stream: UnixStream, runtime: &mut Runtime) -> Result<(), S
     }
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
-    let mut line = Vec::with_capacity(1024);
-    {
-        let reader = BufReader::new(&stream);
-        reader
-            .take(64 * 1024)
-            .read_until(b'\n', &mut line)
-            .map_err(|error| format!("Could not read IPC request: {error}"))?;
-    }
-    if line.len() > 64 * 1024 {
-        return Err("IPC request exceeds 64 KiB".into());
-    }
+    let line = crosshair_core::read_bounded_line(BufReader::new(&stream))
+        .map_err(|error| format!("Could not read IPC request: {error}"))?;
     let request: serde_json::Value =
         serde_json::from_slice(&line).map_err(|_| "Invalid JSON in IPC request".to_string())?;
     let command = request
@@ -877,5 +868,148 @@ mod shm_canvas_tests {
         assert!(error.contains("2 bytes available"));
         assert!(error.contains("3 required"));
         assert_eq!(canvas, [0; 2]);
+    }
+}
+
+#[cfg(test)]
+mod ipc_security_tests {
+    use super::*;
+    use std::{
+        os::unix::fs::{PermissionsExt, symlink},
+        path::Path,
+        sync::{Arc, Barrier},
+        thread,
+    };
+
+    fn test_paths(root: &Path) -> AppPaths {
+        let runtime_dir = root.join("runtime");
+        AppPaths {
+            config_dir: root.join("config"),
+            config_file: root.join("config/config.json"),
+            data_dir: root.join("data"),
+            state_dir: root.join("state"),
+            runtime_dir: runtime_dir.clone(),
+            socket_file: runtime_dir.join("ipc.sock"),
+            lock_file: runtime_dir.join("daemon.lock"),
+            log_file: root.join("state/crosshair.log"),
+        }
+    }
+
+    #[test]
+    fn daemon_lock_allows_only_one_concurrent_owner() {
+        const THREADS: usize = 8;
+
+        let directory = tempfile::tempdir().unwrap();
+        let paths = Arc::new(test_paths(directory.path()));
+        let ready = Arc::new(Barrier::new(THREADS));
+        let release = Arc::new(Barrier::new(THREADS));
+        let workers = (0..THREADS)
+            .map(|_| {
+                let paths = Arc::clone(&paths);
+                let ready = Arc::clone(&ready);
+                let release = Arc::clone(&release);
+                thread::spawn(move || {
+                    let lock = acquire_daemon_lock(&paths);
+                    let acquired = lock.is_ok();
+                    ready.wait();
+                    release.wait();
+                    acquired
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let winners = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .filter(|acquired| *acquired)
+            .count();
+
+        assert_eq!(winners, 1, "exactly one daemon may own the lock");
+    }
+
+    #[test]
+    fn daemon_lock_refuses_symlinked_and_hard_linked_targets() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = test_paths(directory.path());
+        paths.ensure_runtime_dir().unwrap();
+
+        let outside = directory.path().join("outside-lock");
+        std::fs::write(&outside, b"preserve").unwrap();
+        symlink(&outside, &paths.lock_file).unwrap();
+        assert!(acquire_daemon_lock(&paths).is_err());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"preserve");
+
+        std::fs::remove_file(&paths.lock_file).unwrap();
+        std::fs::write(&paths.lock_file, b"lock").unwrap();
+        let second_link = directory.path().join("second-lock-link");
+        std::fs::hard_link(&paths.lock_file, &second_link).unwrap();
+        let error = acquire_daemon_lock(&paths).unwrap_err();
+        assert!(error.contains("singly-linked"));
+        assert_eq!(std::fs::read(&paths.lock_file).unwrap(), b"lock");
+        assert_eq!(std::fs::read(&second_link).unwrap(), b"lock");
+    }
+
+    #[test]
+    fn listener_replaces_only_a_stale_owned_socket_and_uses_private_mode() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = test_paths(directory.path());
+        paths.ensure_runtime_dir().unwrap();
+
+        let stale = UnixListener::bind(&paths.socket_file).unwrap();
+        drop(stale);
+
+        let listener = prepare_listener(&paths).unwrap();
+        assert_eq!(
+            paths.socket_file.metadata().unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let client = UnixStream::connect(&paths.socket_file).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        assert!(peer_is_current_user(&accepted));
+        drop(client);
+    }
+
+    #[test]
+    fn listener_refuses_symlink_and_regular_file_socket_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = test_paths(directory.path());
+        paths.ensure_runtime_dir().unwrap();
+
+        let outside = directory.path().join("outside");
+        std::fs::write(&outside, b"preserve").unwrap();
+        symlink(&outside, &paths.socket_file).unwrap();
+        assert!(prepare_listener(&paths).is_err());
+        assert!(
+            paths
+                .socket_file
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read(&outside).unwrap(), b"preserve");
+
+        std::fs::remove_file(&paths.socket_file).unwrap();
+        std::fs::write(&paths.socket_file, b"regular-file").unwrap();
+        assert!(prepare_listener(&paths).is_err());
+        assert_eq!(std::fs::read(&paths.socket_file).unwrap(), b"regular-file");
+    }
+
+    #[test]
+    fn socket_guard_does_not_delete_a_replacement_regular_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = test_paths(directory.path());
+        paths.ensure_runtime_dir().unwrap();
+        let _listener = prepare_listener(&paths).unwrap();
+        let guard = SocketPathGuard {
+            path: paths.socket_file.clone(),
+        };
+
+        std::fs::remove_file(&paths.socket_file).unwrap();
+        std::fs::write(&paths.socket_file, b"replacement").unwrap();
+        drop(guard);
+
+        assert_eq!(std::fs::read(&paths.socket_file).unwrap(), b"replacement");
     }
 }

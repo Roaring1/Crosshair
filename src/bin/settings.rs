@@ -305,7 +305,7 @@ fn update_preview(ui: &SettingsWindow, config: &Config) {
 
 #[cfg(unix)]
 fn notify_overlay(config: &Config, paths: &AppPaths) -> Result<(), String> {
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{BufReader, Write};
     use std::os::unix::net::UnixStream;
 
     let mut connected = UnixStream::connect(&paths.socket_file);
@@ -337,19 +337,15 @@ fn notify_overlay(config: &Config, paths: &AppPaths) -> Result<(), String> {
         "payload": serde_json::to_value(config).map_err(|error| error.to_string())?,
     });
     let mut encoded = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
-    if encoded.len() > 64 * 1024 {
+    if encoded.len() >= crosshair_core::MAX_IPC_MESSAGE_BYTES {
         return Err("Settings update exceeds the IPC message limit".into());
     }
     encoded.push(b'\n');
     stream
         .write_all(&encoded)
         .map_err(|error| error.to_string())?;
-    let reader = BufReader::new(stream);
-    let mut line = Vec::with_capacity(256);
-    reader
-        .take(64 * 1024)
-        .read_until(b'\n', &mut line)
-        .map_err(|error| error.to_string())?;
+    let line = crosshair_core::read_bounded_line(BufReader::new(stream))
+        .map_err(|error| format!("Invalid response from overlay: {error}"))?;
     let response: serde_json::Value =
         serde_json::from_slice(&line).map_err(|error| error.to_string())?;
     if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
