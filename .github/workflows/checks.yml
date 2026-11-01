@@ -117,6 +117,12 @@ jobs:
       - name: Test isolated install, autostart and uninstall lifecycle
         run: bash tests/install-smoke.sh
 
+      - name: Build optimized Linux executables
+        run: cargo build --locked --release --features settings-ui --bins
+
+      - name: Test optimized install, autostart and uninstall lifecycle
+        run: CROSSHAIR_BIN=target/release/crosshair bash tests/install-smoke.sh
+
       - name: Test X11 click-through and cold-start lifecycle
         run: xvfb-run -a bash tests/x11-smoke.sh
 

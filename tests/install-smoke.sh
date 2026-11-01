@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-BIN="$REPO_ROOT/target/debug/crosshair"
+BIN="${CROSSHAIR_BIN:-$REPO_ROOT/target/debug/crosshair}"
 ROOT="$(mktemp -d)"
 
 cleanup() {
