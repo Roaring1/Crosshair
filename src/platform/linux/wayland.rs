@@ -334,7 +334,7 @@ impl Runtime {
                 wl_shm::Format::Argb8888,
             )
             .map_err(|error| format!("Could not allocate crosshair surface: {error}"))?;
-        canvas.copy_from_slice(&raster.bgra_premultiplied);
+        copy_pixels_to_canvas(canvas, &raster.bgra_premultiplied)?;
         let entry = self
             .surfaces
             .get_mut(&output_id)
@@ -363,6 +363,21 @@ impl Runtime {
         };
         self.render_entry(output_id)
     }
+}
+
+// Smithay Client Toolkit rounds each shared-memory slot up to a 64-byte
+// boundary. The buffer stride still describes only the actual pixel rows, so
+// the canvas can be larger than the tightly packed raster by a few tail bytes.
+fn copy_pixels_to_canvas(canvas: &mut [u8], pixels: &[u8]) -> Result<(), String> {
+    if canvas.len() < pixels.len() {
+        return Err(format!(
+            "Wayland shared-memory canvas is too small ({} bytes available, {} required)",
+            canvas.len(),
+            pixels.len()
+        ));
+    }
+    canvas[..pixels.len()].copy_from_slice(pixels);
+    Ok(())
 }
 
 impl CompositorHandler for Runtime {
@@ -835,5 +850,32 @@ mod output_selection_tests {
         let error = select_output_ids(&config, &fixture_outputs()).unwrap_err();
         assert!(error.contains("Cursor-active monitor selection"));
         assert!(error.contains("named monitor"));
+    }
+}
+
+#[cfg(test)]
+mod shm_canvas_tests {
+    use super::copy_pixels_to_canvas;
+
+    #[test]
+    fn copies_tightly_packed_pixels_into_a_64_byte_aligned_slot() {
+        let pixels = (0..37).map(|value| value as u8).collect::<Vec<_>>();
+        let slot_len = (pixels.len() + 63) & !63;
+        let mut canvas = vec![0xa5; slot_len];
+
+        copy_pixels_to_canvas(&mut canvas, &pixels).unwrap();
+
+        assert_eq!(&canvas[..pixels.len()], pixels);
+        assert!(canvas[pixels.len()..].iter().all(|byte| *byte == 0xa5));
+    }
+
+    #[test]
+    fn rejects_a_canvas_that_is_smaller_than_the_pixel_payload() {
+        let mut canvas = [0; 2];
+        let error = copy_pixels_to_canvas(&mut canvas, &[1, 2, 3]).unwrap_err();
+
+        assert!(error.contains("2 bytes available"));
+        assert!(error.contains("3 required"));
+        assert_eq!(canvas, [0; 2]);
     }
 }
