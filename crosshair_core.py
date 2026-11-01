@@ -1017,7 +1017,14 @@ def schedule_restart(script: Path, argv: list[str], log_file: Path) -> int:
         raise CoreError(f"Refusing symlink restart log: {log_file}")
     log_flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
     log_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    log_fd = os.open(log_file, log_flags, 0o600)
+    log_flags |= getattr(os, "O_NONBLOCK", 0)
+    try:
+        log_fd = os.open(log_file, log_flags, 0o600)
+    except OSError as exc:
+        raise CoreError(f"Could not safely open restart log {log_file}: {exc}") from exc
+    if not stat.S_ISREG(os.fstat(log_fd).st_mode):
+        os.close(log_fd)
+        raise CoreError(f"Refusing non-regular restart log: {log_file}")
     os.fchmod(log_fd, 0o600)
     read_fd, write_fd = os.pipe()
     os.set_inheritable(read_fd, True)

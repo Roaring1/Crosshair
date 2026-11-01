@@ -481,6 +481,31 @@ def test_relative_xdg_paths_ignored(tmp_path):
     assert app.runtime_dir.is_absolute()
 
 
+def test_restart_refuses_fifo_log_without_spawning_helper(tmp_path, monkeypatch):
+    app = paths(tmp_path)
+    core.ensure_directory(app.state_dir)
+    os.mkfifo(app.log_file)
+    spawned = []
+
+    def unexpected_spawn(*args, **kwargs):
+        spawned.append((args, kwargs))
+        raise AssertionError("restart helper must not spawn with a special-file log")
+
+    monkeypatch.setattr(core.subprocess, "Popen", unexpected_spawn)
+
+    with pytest.raises(
+        core.CoreError,
+        match=r"Could not safely open restart log|non-regular restart log",
+    ):
+        core.schedule_restart(
+            Path(__file__),
+            ["--daemon", "--no-ui"],
+            app.log_file,
+        )
+
+    assert spawned == []
+
+
 def test_recv_line_rejects_oversized_message():
     server, client = socket.socketpair()
     try:

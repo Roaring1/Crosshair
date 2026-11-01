@@ -2,6 +2,9 @@
 
 ## Unreleased — 31/10/2026
 
+- **Hardened:** the delayed-restart helper log now opens with `O_NOFOLLOW|O_NONBLOCK`, requires a regular file, and is permissioned through its descriptor. A FIFO or symlink at the restart-log path is refused before the helper process can be spawned.
+- **Added:** a FIFO restart-log regression test verifies that rejected special-file paths never launch the replacement helper.
+
 - **Hardened:** the daemon lock opens nonblocking with `O_NOFOLLOW` and accepts only regular files; FIFO and device-node paths are rejected before flock or file mutation. Lock descriptors are closed on every validation failure.
 - **Fixed dependency advisory:** the hosted Python 3.10 resolver identified 17 advisories affecting transitive `filelock==4.1.0`. The audit requirements now pin fixed `filelock==4.2.1`; because that patched release requires Python 3.11+, dependency auditing runs in a dedicated Python 3.14 job while the test/lint/Bandit matrix continues to include Python 3.10.
 - **Hardened:** daemon shutdown removes only the exact socket it created, matching device, inode and socket type. A replacement file at the socket path is retained.

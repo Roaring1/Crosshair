@@ -34,9 +34,10 @@ Crosshair is a single-user Linux desktop overlay, not a network service.
   descriptor.
 - IPC JSON parsing rejects duplicate keys and non-standard numeric constants;
   the encoder refuses NaN and Infinity values.
-- Directory modes, lock-file modes, and log-file modes are applied through
-  verified file descriptors. Lock and log opens are no-follow and nonblocking;
-  both reject non-regular files. The socket is created with owner-only
+- Directory modes, lock-file modes, normal log-file modes, and delayed
+  restart-helper log modes are applied through verified file descriptors.
+  Lock and log opens are no-follow and nonblocking; they reject non-regular
+  files. The socket is created with owner-only
   permissions at bind time. Startup refuses to delete a non-socket entry at
   the socket path, and shutdown unlinks only the exact socket inode created
   by that daemon instance.
