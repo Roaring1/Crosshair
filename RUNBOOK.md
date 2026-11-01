@@ -34,9 +34,8 @@ throwaway directory so it never touched a real config.
 - **Corrupt-config recovery**: a truncated `config.json` is preserved as
   a timestamped `.corrupt-*` backup (mode 0600) and defaults are used;
   both `--doctor` and `--status` report this clearly.
-- **Config watcher**: an external edit to `config.json` while the daemon
-  is running is picked up within ~2 seconds and reflected in
-  `--status`.
+- **Config reload**: external edits to `config.json` are intentionally
+  command-driven; `crosshair --reload` applies them without an idle stat loop.
 - **Auto-save-off transition**: confirmed it persists via both the
   settings-window checkbox and `--set`, and that further changes
   correctly stay in-memory-only afterward.
@@ -82,12 +81,22 @@ On the user's Nobara/Plasma Wayland session:
   starts successfully.
 - Corrected the generated app-menu entry and the existing
   `~/Desktop/crosshair.desktop` shortcut to launch the interactive settings
-  path (no `--daemon --no-ui`). Kept login autostart headless. All three
-  desktop files pass `desktop-file-validate`, and KDE's service cache was
-  rebuilt.
+  path (no `--daemon --no-ui`). Login autostart is now opt-in rather than
+  installed by default. All generated desktop entries pass
+  `desktop-file-validate`.
 - The actual KDE click-to-open/settings-window presentation, pointer
   passthrough, multi-monitor visual placement, fullscreen/game compatibility,
   sleep/resume and long-duration stability were not visually exercised.
+
+## On-demand performance design
+
+The normal install does not autostart a daemon. A cold `crosshair --toggle`
+starts the overlay in its ON state; a toggle against a running daemon turns it
+OFF, saves the setting and exits after a short grace period if Settings is not
+open. The IPC listener blocks in `accept()`; config reload and fixed-monitor
+geometry updates are event-driven. Only `monitor_mode=active` retains a
+cursor-location poll. `--autostart` is an explicit opt-in, not part of the
+normal Padfire setup.
 
 ## Needs your real machine
 

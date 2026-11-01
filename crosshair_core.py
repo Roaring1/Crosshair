@@ -564,13 +564,6 @@ def save_config(config: Mapping[str, Any], path: Path) -> JsonObject:
     atomic_write_text(path, json.dumps(clean, indent=2, sort_keys=True) + "\n")
     return clean
 
-def file_fingerprint(path: Path) -> tuple[int, int, int] | None:
-    try:
-        stat = Path(path).stat()
-    except OSError:
-        return None
-    return (stat.st_ino, stat.st_size, stat.st_mtime_ns)
-
 def dispatch_and_wait(
     schedule: Callable[[Callable[[], bool]], Any],
     callback: Callable[[], Any],
@@ -836,7 +829,8 @@ class IpcServer:
                 )
             self.socket_identity = (socket_info.st_dev, socket_info.st_ino)
             self.sock.listen(16)
-            self.sock.settimeout(0.5)
+            # A blocking accept sleeps without periodic wakeups. stop() uses
+            # a private local connection to wake the listener immediately.
             self.thread = threading.Thread(
                 target=self._serve, name="crosshair-ipc", daemon=True
             )
@@ -850,15 +844,19 @@ class IpcServer:
 
     def _serve(self) -> None:
         while not self.stop_event.is_set():
-            if self.sock is None:
+            listener = self.sock
+            if listener is None:
                 return
             try:
-                conn, _ = self.sock.accept()
-            except TimeoutError:
-                continue
+                conn, _ = listener.accept()
             except OSError:
                 if not self.stop_event.is_set():
                     self.log.exception("IPC accept failed")
+                return
+            # stop() connects once to wake accept(); never parse or dispatch
+            # that shutdown-only connection as an IPC request.
+            if self.stop_event.is_set():
+                conn.close()
                 return
             with conn:
                 conn.settimeout(1.0)
@@ -906,9 +904,22 @@ class IpcServer:
 
     def stop(self) -> None:
         self.stop_event.set()
+        # Wake a blocking accept() without a timer or polling loop. The
+        # listener stays available until the worker accepts this connection.
+        if self.sock is not None:
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as wake:
+                    wake.settimeout(0.5)
+                    wake.connect(str(self.paths.socket_file))
+            except OSError:
+                pass
+        if self.thread and self.thread is not threading.current_thread():
+            self.thread.join(timeout=1.5)
+        # Fallback cleanup still closes the listener if the wake connection
+        # could not be delivered or the worker was processing another client.
         self._cleanup_socket()
         if self.thread and self.thread is not threading.current_thread():
-            self.thread.join(timeout=2.0)
+            self.thread.join(timeout=1.0)
         self.thread = None
         if self.lock:
             self.lock.close()

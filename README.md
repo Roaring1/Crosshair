@@ -20,7 +20,8 @@ v3.1 build. See `CHANGELOG.md` for the full list of fixes and
 - Per-monitor targeting: all / primary / active (follows cursor) / by
   index / by connector name
 - Tray icon (Ayatana AppIndicator, falling back to legacy AppIndicator3,
-  falling back to `Gtk.StatusIcon`) with toggle/restart/quit
+  falling back to `Gtk.StatusIcon`) with toggle/restart/quit while the
+  overlay daemon is active
 - Local IPC socket for scripted control (hotkeys, `--status`, `--toggle`,
   `--show`, `--hide`, `--set`, `--reload`, `--restart`, `--quit`)
 - Click-through on both backends — the overlay never intercepts input
@@ -76,7 +77,7 @@ never mandatory.
 ```bash
 python3 crosshair.py            # launch GUI (starts daemon if not running)
 python3 crosshair.py --status   # print live daemon status
-python3 crosshair.py --toggle   # show/hide the running instance
+python3 crosshair.py --toggle   # cold start: show; running daemon: toggle
 python3 crosshair.py --show
 python3 crosshair.py --hide
 python3 crosshair.py --set '{"color": "#00ff88", "size": 8}'
@@ -89,11 +90,19 @@ python3 crosshair.py --quit     # idempotent -- safe to call when not running
 out-of-range values are rejected outright (not silently clamped), and
 the command's exit code and stderr message tell you why.
 
-The settings window opens on launch by default; if the daemon is already
-running, launching the app opens its settings window. Close it to minimize
-to tray. Use `--daemon --no-ui` only for background startup (e.g. login
-autostart); generated app-menu and desktop shortcuts use the interactive
-launch so clicking them opens settings.
+Crosshair is on-demand by default. No daemon is started at login, no settings
+widgets are built for the Padfire/CLI path, and no background process remains
+after the overlay is hidden and Settings is closed. A cold `--toggle` activates
+the overlay; while the daemon is running, `--toggle` flips it. Hiding it saves
+the state and shuts the daemon down after a short grace period when Settings
+is closed. The daemon is required to maintain the active overlay; its IPC listener blocks instead
+of polling. Fixed-monitor mode has no recurring monitor scan, and external
+config edits are loaded only on an explicit `--reload`.
+
+The settings window is created only when explicitly requested with
+`--config` or by opening the app-menu entry. Closing it while the overlay is
+hidden also allows the daemon to exit. Login autostart remains available as
+an explicit opt-in via `--autostart`, but is not installed by default.
 
 ### Wayland hotkeys
 
@@ -110,19 +119,19 @@ Shortcuts) to a command instead:
 ## Install / autostart / uninstall
 
 ```bash
-python3 crosshair.py --install           # ~/.local/bin/crosshair + app-menu entry
-python3 crosshair.py --autostart         # + XDG autostart entry (no systemd unit)
+python3 crosshair.py --install           # on-demand launcher + app-menu entry
+python3 crosshair.py --autostart         # explicitly opt into login autostart
 python3 crosshair.py --desktop-shortcut  # double-click icon on the Desktop
 
 python3 crosshair.py --uninstall         # removes the above, keeps your config
 python3 crosshair.py --purge-config      # explicitly removes the config too
 ```
 
-Autostart is an XDG `.desktop` entry under
-`$XDG_CONFIG_HOME/autostart/` — nothing is added to systemd. If you
-previously installed the pre-3.2 build (which used a systemd user
-service), `--autostart` and `--uninstall` both detect and remove that
-legacy unit automatically.
+The normal `--install` path removes a stale Crosshair XDG autostart entry
+so an older installation does not leave a daemon running at login. Use
+`--autostart` only to opt back in; it writes an XDG `.desktop` entry and
+does not create a systemd unit. Legacy pre-3.2 systemd user units are still
+detected and removed by the existing migration/uninstall path.
 
 ---
 
@@ -138,8 +147,9 @@ legacy unit automatically.
 | Installed core | `${XDG_DATA_HOME:-~/.local/share}/crosshair/crosshair_core.py` |
 | Launcher | `~/.local/bin/crosshair` |
 | App-menu entry | `${XDG_DATA_HOME:-~/.local/share}/applications/crosshair.desktop` |
+| App icon | `${XDG_DATA_HOME:-~/.local/share}/icons/hicolor/scalable/apps/crosshair.svg` |
 | Desktop shortcut | `$(xdg-user-dir DESKTOP)/crosshair.desktop` |
-| Autostart entry | `${XDG_CONFIG_HOME:-~/.config}/autostart/crosshair.desktop` |
+| Optional autostart entry | `${XDG_CONFIG_HOME:-~/.config}/autostart/crosshair.desktop` |
 
 If `$XDG_RUNTIME_DIR` isn't set or valid, a private cache-backed
 fallback is used and `--doctor` will warn about it. On a normal desktop

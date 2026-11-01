@@ -5,6 +5,7 @@ import multiprocessing as mp
 import os
 import socket
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -631,6 +632,21 @@ def test_ipc_server_refuses_to_delete_non_socket_path(tmp_path):
     lock.close()
 
 
+def test_ipc_server_stop_wakes_blocked_accept_without_polling(tmp_path):
+    app = paths(tmp_path)
+    server = core.IpcServer(app, lambda _request: {"ok": True}, core.setup_logging(app))
+    server.start()
+    worker = server.thread
+    assert worker is not None and worker.is_alive()
+
+    started = time.monotonic()
+    server.stop()
+
+    assert time.monotonic() - started < 1.0
+    assert not worker.is_alive()
+    assert not app.socket_file.exists()
+
+
 def test_ipc_shutdown_does_not_unlink_replacement_file(tmp_path):
     app = paths(tmp_path)
     server = core.IpcServer(app, lambda _request: {"ok": True}, core.setup_logging(app))
@@ -675,11 +691,15 @@ def test_ipc_rejects_unverifiable_peer_credentials_without_dispatch(
 
     class FakeListener:
         def accept(self):
-            server.stop_event.set()
             return connection, None
 
     server.sock = FakeListener()
-    monkeypatch.setattr(core, "peer_uid", lambda _connection: None)
+
+    def unverifiable_peer(_connection):
+        server.stop_event.set()
+        return None
+
+    monkeypatch.setattr(core, "peer_uid", unverifiable_peer)
 
     server._serve()
 

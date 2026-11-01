@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import io
 import shlex
 import subprocess
@@ -24,6 +25,36 @@ def app_paths(tmp_path):
             "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
         }
     )
+
+
+def test_app_source_has_no_emoji_characters_in_string_literals():
+    source = Path(crosshair.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    def is_emoji(character):
+        point = ord(character)
+        return (
+            0x1F000 <= point <= 0x1FAFF
+            or 0x2600 <= point <= 0x27BF
+            or 0x1FC00 <= point <= 0x1FFFF
+        )
+
+    assert not [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and any(is_emoji(character) for character in node.value)
+    ]
+
+
+def test_cold_start_toggle_is_show_but_live_toggle_is_preserved():
+    assert crosshair._cold_start_request({"cmd": "toggle"}) == {"cmd": "show"}
+    assert crosshair._cold_start_request({"cmd": "hide"}) == {"cmd": "hide"}
+    assert crosshair._cold_start_request({"cmd": "set", "payload": {"size": 7}}) == {
+        "cmd": "set",
+        "payload": {"size": 7},
+    }
 
 
 def test_monitor_selection_values_preserve_duplicate_ordinal():
@@ -118,6 +149,7 @@ def test_uninstall_removes_desktop_shortcut(tmp_path, monkeypatch):
         paths.bin_file,
         paths.installed_source,
         paths.installed_source.with_name("crosshair_core.py"),
+        crosshair.app_icon_path(paths),
         crosshair.desktop_shortcut_path(),
     ]
     for artifact in artifacts:
@@ -279,6 +311,18 @@ def test_installed_launcher_treats_paths_as_data_not_shell_syntax(tmp_path, monk
     assert paths.bin_file.read_text(encoding="utf-8").startswith("#!/bin/sh\n")
 
 
+def test_install_self_removes_stale_autostart_by_default(tmp_path, monkeypatch):
+    paths = app_paths(tmp_path)
+    paths.autostart_entry.parent.mkdir(parents=True, exist_ok=True)
+    paths.autostart_entry.write_text("[Desktop Entry]\nName=Crosshair\n", encoding="utf-8")
+    monkeypatch.setattr(crosshair, "_validate_desktop_file", lambda _path: None)
+
+    crosshair.install_self(paths)
+
+    assert not paths.autostart_entry.exists()
+    assert crosshair.app_icon_path(paths).is_file()
+
+
 def test_desktop_shortcut_installs_interactive_exec(tmp_path, monkeypatch):
     paths = app_paths(tmp_path)
     desktop_dir = tmp_path / "Desktop"
@@ -291,7 +335,10 @@ def test_desktop_shortcut_installs_interactive_exec(tmp_path, monkeypatch):
     content = shortcut.read_text(encoding="utf-8")
     assert f'Exec="{paths.bin_file}"' in content
     assert "--daemon" not in content
+    assert "Icon=crosshair" in content
+    assert "StartupWMClass=crosshair" in content
     assert paths.installed_source.is_file()
+    assert crosshair.app_icon_path(paths).is_file()
     installed_core = paths.installed_source.with_name("crosshair_core.py")
     source_core = Path(crosshair.__file__).with_name("crosshair_core.py")
     assert installed_core.read_bytes() == source_core.read_bytes()
@@ -327,6 +374,9 @@ def test_autostart_installs_headless_exec(tmp_path, monkeypatch):
     content = autostart.read_text(encoding="utf-8")
     assert f'Exec="{paths.bin_file}" --daemon --no-ui' in content
     assert "NoDisplay=true" in content
+    assert "Icon=crosshair" in content
+    assert "StartupWMClass=crosshair" in content
+    assert crosshair.app_icon_path(paths).is_file()
 
 
 def test_purge_config_recursively_removes_tree_without_following_symlinks(tmp_path):

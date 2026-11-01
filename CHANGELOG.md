@@ -2,6 +2,12 @@
 
 ## Unreleased — 31/10/2026
 
+- **Optimized:** the default install is on-demand, not a login daemon. A cold `--toggle` shows the overlay; a toggle against a live daemon hides it, saves state and exits after a short grace period when Settings is closed. `--autostart` remains an explicit opt-in.
+- **Optimized:** Settings is created lazily; config polling and the fixed-monitor geometry poll are removed; monitor changes are event-driven; the IPC listener blocks until a real command or explicit shutdown wakeup.
+- **Optimized:** the transparent overlay is unmapped while disabled, reducing compositor work. The active overlay remains resident only while it is needed.
+- **Fixed:** GTK publishes the `crosshair` Wayland application ID matching `crosshair.desktop`; the installer provides an original hicolor SVG icon for KDE task/window and application-menu lookup.
+- **Changed:** removed emoji and decorative glyphs from visible controls and tray labels; the monitor dropdown uses the active GTK icon theme.
+
 - **Hardened:** the delayed-restart helper log now opens with `O_NOFOLLOW|O_NONBLOCK`, requires a regular file, and is permissioned through its descriptor. A FIFO or symlink at the restart-log path is refused before the helper process can be spawned.
 - **Added:** a FIFO restart-log regression test verifies that rejected special-file paths never launch the replacement helper.
 
@@ -67,10 +73,12 @@
   across GDK wrapper recreation.
 - **Fixed:** the settings dropdown now persists `monitor_name_ordinal`, so
   choosing the second display of a duplicate model survives save/restart.
-- **Fixed:** monitor-added/removed signals and the 400ms polling fallback now
-  coalesce the same topology change into one overlay rebuild. Active-monitor
-  state is initialized from the first build, avoiding an unnecessary rebuild
-  shortly after startup; stale monitor-name cache entries are pruned.
+- **Fixed:** monitor-added/removed signals and GDK monitor-property
+  notifications coalesce the same topology change into one overlay rebuild.
+  Active-monitor state is initialized from the first build, avoiding an
+  unnecessary rebuild shortly after startup; stale monitor-name cache entries
+  are pruned. The later on-demand optimization removed the fixed-mode polling
+  fallback; only cursor-following active-monitor mode polls every 400 ms.
 - **Fixed:** large diagonal `X` and `X-dot` crosshairs now allocate enough
   window space for their radial endpoints. The settings preview scales large
   designs to fit its preview area without changing the actual overlay size.
