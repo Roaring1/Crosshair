@@ -508,10 +508,11 @@ pub(super) struct SocketPathGuard {
 
 impl Drop for SocketPathGuard {
     fn drop(&mut self) {
-        if let Ok(metadata) = self.path.symlink_metadata() {
-            if metadata.file_type().is_socket() && metadata.uid() == unsafe { libc::getuid() } {
-                let _ = std::fs::remove_file(&self.path);
-            }
+        if let Ok(metadata) = self.path.symlink_metadata()
+            && metadata.file_type().is_socket()
+            && metadata.uid() == unsafe { libc::getuid() }
+        {
+            let _ = std::fs::remove_file(&self.path);
         }
     }
 }
@@ -765,8 +766,10 @@ mod output_selection_tests {
 
     #[test]
     fn all_outputs_are_returned_in_stable_position_then_id_order() {
-        let mut config = Config::default();
-        config.monitor_mode = "all".into();
+        let config = Config {
+            monitor_mode: "all".into(),
+            ..Default::default()
+        };
 
         assert_eq!(
             select_output_ids(&config, &fixture_outputs()).unwrap(),
@@ -776,36 +779,44 @@ mod output_selection_tests {
 
     #[test]
     fn primary_fallback_is_the_top_left_most_output() {
-        let mut config = Config::default();
-        config.monitor_mode = "primary".into();
+        let config = Config {
+            monitor_mode: "primary".into(),
+            ..Default::default()
+        };
 
         assert_eq!(select_output_ids(&config, &fixture_outputs()).unwrap(), [2]);
     }
 
     #[test]
     fn index_selection_uses_the_same_stable_output_order() {
-        let mut config = Config::default();
-        config.monitor_mode = "index".into();
-        config.monitor_index = 1;
+        let config = Config {
+            monitor_mode: "index".into(),
+            monitor_index: 1,
+            ..Default::default()
+        };
 
         assert_eq!(select_output_ids(&config, &fixture_outputs()).unwrap(), [1]);
     }
 
     #[test]
     fn duplicate_connector_names_use_the_saved_ordinal_after_position_sorting() {
-        let mut config = Config::default();
-        config.monitor_mode = "name".into();
-        config.monitor_name = "DP-1".into();
-        config.monitor_name_ordinal = 1;
+        let config = Config {
+            monitor_mode: "name".into(),
+            monitor_name: "DP-1".into(),
+            monitor_name_ordinal: 1,
+            ..Default::default()
+        };
 
         assert_eq!(select_output_ids(&config, &fixture_outputs()).unwrap(), [1]);
     }
 
     #[test]
     fn missing_named_output_returns_no_match_instead_of_another_monitor() {
-        let mut config = Config::default();
-        config.monitor_mode = "name".into();
-        config.monitor_name = "DP-3".into();
+        let config = Config {
+            monitor_mode: "name".into(),
+            monitor_name: "DP-3".into(),
+            ..Default::default()
+        };
 
         assert!(
             select_output_ids(&config, &fixture_outputs())
@@ -816,8 +827,10 @@ mod output_selection_tests {
 
     #[test]
     fn cursor_active_selection_fails_with_an_actionable_wayland_message() {
-        let mut config = Config::default();
-        config.monitor_mode = "active".into();
+        let config = Config {
+            monitor_mode: "active".into(),
+            ..Default::default()
+        };
 
         let error = select_output_ids(&config, &fixture_outputs()).unwrap_err();
         assert!(error.contains("Cursor-active monitor selection"));

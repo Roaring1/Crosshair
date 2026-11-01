@@ -95,10 +95,18 @@ mod tests {
 
     #[test]
     fn prefers_compositor_logical_size_and_uses_scaled_rendering() {
-        let mut config = Config::default();
-        config.size = 200;
-        config.outline.enabled = false;
-        config.shadow.enabled = false;
+        let config = Config {
+            size: 200,
+            outline: crosshair_core::Outline {
+                enabled: false,
+                ..Default::default()
+            },
+            shadow: crosshair_core::Shadow {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
         let layout = build_from_metadata(
             &config,

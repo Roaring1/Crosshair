@@ -479,10 +479,12 @@ mod tests {
 
     #[test]
     fn diagonal_crosshair_bounds_contain_all_endpoints() {
-        let mut config = Config::default();
-        config.shape = "x".into();
-        config.size = 200;
-        config.gap = 200;
+        let config = Config {
+            shape: "x".into(),
+            size: 200,
+            gap: 200,
+            ..Default::default()
+        };
         let raster = render_crosshair(&config).unwrap();
         assert!(raster.width > 500 && raster.height > 500);
         assert_eq!(
@@ -514,13 +516,18 @@ mod tests {
             "cross_dot",
             "x_dot",
         ] {
-            let mut config = Config::default();
-            config.shape = shape.into();
-            config.size = 1;
-            config.thickness = 100;
-            config.gap = 0;
-            config.outline.enabled = true;
-            config.outline.thickness = 20;
+            let config = Config {
+                shape: shape.into(),
+                size: 1,
+                thickness: 100,
+                gap: 0,
+                outline: crate::Outline {
+                    enabled: true,
+                    thickness: 20,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
             let raster = render_crosshair(&config).unwrap();
             let w = raster.width as usize;
             let h = raster.height as usize;
@@ -553,9 +560,11 @@ mod tests {
 
     #[test]
     fn plus_shape_does_not_allocate_for_the_unused_gap_setting() {
-        let mut config = Config::default();
-        config.shape = "plus".into();
-        config.gap = 0;
+        let mut config = Config {
+            shape: "plus".into(),
+            gap: 0,
+            ..Default::default()
+        };
         let compact = render_crosshair(&config).unwrap();
         config.gap = 200;
         let unchanged = render_crosshair(&config).unwrap();
@@ -567,20 +576,31 @@ mod tests {
 
     #[test]
     fn scaled_config_is_validated_before_hidpi_multiplication() {
-        let mut config = Config::default();
-        config.shape = "x_dot".into();
-        config.size = u16::MAX;
-        config.thickness = u16::MAX;
-        config.gap = u16::MAX;
-        config.offset_x = i16::MAX;
-        config.offset_y = i16::MIN;
-        config.outline.thickness = u16::MAX;
-        config.shadow.offset_x = i16::MAX;
-        config.shadow.offset_y = i16::MIN;
-        config.reference_dot.enabled = true;
-        config.reference_dot.size = u16::MAX;
-        config.reference_dot.offset_x = i16::MAX;
-        config.reference_dot.offset_y = i16::MIN;
+        let config = Config {
+            shape: "x_dot".into(),
+            size: u16::MAX,
+            thickness: u16::MAX,
+            gap: u16::MAX,
+            offset_x: i16::MAX,
+            offset_y: i16::MIN,
+            outline: crate::Outline {
+                thickness: u16::MAX,
+                ..Default::default()
+            },
+            shadow: crate::Shadow {
+                offset_x: i16::MAX,
+                offset_y: i16::MIN,
+                ..Default::default()
+            },
+            reference_dot: crate::ReferenceDot {
+                enabled: true,
+                size: u16::MAX,
+                offset_x: i16::MAX,
+                offset_y: i16::MIN,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
         let scaled = {
             let mut normalized = config.clone();
@@ -604,12 +624,20 @@ mod tests {
 
     #[test]
     fn scaled_renderer_preserves_maximum_logical_size_on_hidpi_outputs() {
-        let mut config = Config::default();
-        config.size = 200;
-        config.outline.enabled = false;
-        config.shadow.enabled = false;
-        config.offset_x = 500;
-        config.offset_y = -500;
+        let config = Config {
+            size: 200,
+            offset_x: 500,
+            offset_y: -500,
+            outline: crate::Outline {
+                enabled: false,
+                ..Default::default()
+            },
+            shadow: crate::Shadow {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
         let logical = render_crosshair(&config).unwrap();
         let physical = render_crosshair_scaled(&config, 2).unwrap();
@@ -635,15 +663,22 @@ mod tests {
 
     #[test]
     fn reference_dot_uses_its_own_opacity_color_and_offset() {
-        let mut config = Config::default();
-        config.opacity = 0.05;
-        config.outline.enabled = false;
-        config.reference_dot.enabled = true;
-        config.reference_dot.color = "#12abef".into();
-        config.reference_dot.opacity = 0.5;
-        config.reference_dot.size = 3;
-        config.reference_dot.offset_x = 40;
-        config.reference_dot.offset_y = -30;
+        let config = Config {
+            opacity: 0.05,
+            outline: crate::Outline {
+                enabled: false,
+                ..Default::default()
+            },
+            reference_dot: crate::ReferenceDot {
+                enabled: true,
+                color: "#12abef".into(),
+                opacity: 0.5,
+                size: 3,
+                offset_x: 40,
+                offset_y: -30,
+            },
+            ..Default::default()
+        };
 
         let raster = render_crosshair(&config).unwrap();
         let x = (i32::from(config.offset_x) + i32::from(config.reference_dot.offset_x)
@@ -666,9 +701,14 @@ mod tests {
 
     #[test]
     fn global_offset_moves_the_raster_origin_without_changing_its_pixels() {
-        let mut config = Config::default();
-        config.shape = "x_dot".into();
-        config.shadow.enabled = true;
+        let mut config = Config {
+            shape: "x_dot".into(),
+            shadow: crate::Shadow {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let original = render_crosshair(&config).unwrap();
 
         config.offset_x = 11;
@@ -689,13 +729,18 @@ mod tests {
     #[test]
     fn intersecting_stroke_subpaths_are_blended_once() {
         for shape in ["cross", "plus", "x"] {
-            let mut config = Config::default();
-            config.shape = shape.into();
-            config.size = 10;
-            config.thickness = 6;
-            config.gap = 0;
-            config.opacity = 0.5;
-            config.outline.enabled = false;
+            let config = Config {
+                shape: shape.into(),
+                size: 10,
+                thickness: 6,
+                gap: 0,
+                opacity: 0.5,
+                outline: crate::Outline {
+                    enabled: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
 
             let raster = render_crosshair(&config).unwrap();
             let center_x = (i32::from(config.offset_x) - raster.origin_x) as u32;
