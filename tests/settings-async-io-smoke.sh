@@ -35,17 +35,19 @@ export HOME="$ROOT/home"
 export XDG_CONFIG_HOME="$ROOT/config"
 export XDG_STATE_HOME="$ROOT/state"
 export XDG_DATA_HOME="$ROOT/data"
+export XDG_BIN_HOME="$ROOT/bin"
 export XDG_RUNTIME_DIR="$ROOT/runtime"
 export XDG_SESSION_TYPE=x11
 unset WAYLAND_DISPLAY
 
 SOCKET="$XDG_RUNTIME_DIR/crosshair/ipc.sock"
 ACCEPTED="$ROOT/ipc-accepted"
-export SOCKET ACCEPTED
+REPLIED="$ROOT/ipc-replied"
+export SOCKET ACCEPTED REPLIED
 printf '%s\n' '{"enabled":false}' > "$XDG_CONFIG_HOME/crosshair/config.json"
 
-# The fake daemon accepts the IPC payload but deliberately withholds its
-# response longer than notify_overlay's two-second read timeout.
+# The fake daemon withholds its reply long enough for a second UI action,
+# but responds before notify_overlay's two-second read timeout.
 python3 - <<'PY' &
 import os
 import socket
@@ -53,6 +55,7 @@ import time
 
 path = os.environ["SOCKET"]
 accepted = os.environ["ACCEPTED"]
+replied = os.environ["REPLIED"]
 server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 server.bind(path)
 os.chmod(path, 0o600)
@@ -63,7 +66,9 @@ while True:
         payload = connection.recv(65536)
         with open(accepted, "w", encoding="utf-8") as marker:
             marker.write("accepted")
-        time.sleep(2.6)
+        time.sleep(1.5)
+        with open(replied, "w", encoding="utf-8") as marker:
+            marker.write("replied")
         try:
             connection.sendall(b'{"ok":true}\n')
         except OSError:
@@ -116,7 +121,31 @@ xvfb-run -a bash -c '
     fi
     echo "PASS: Appearance resized the window to $responsive_height px while IPC was waiting"
 
-    echo "[4] verify WM_DELETE_WINDOW and request a normal window close"
+    echo "[4] queue Install autostart while the first preview request is still in flight"
+    xdotool mousemove --window "$window" 75 24 click 1
+    sleep 0.15
+    xdotool mousemove --window "$window" 515 187 click 1
+    sleep 0.15
+    xdotool mousemove --window "$window" 140 398 click 1
+    test ! -f "$REPLIED"
+    AUTOSTART="$XDG_CONFIG_HOME/autostart/crosshair.desktop"
+    for _ in $(seq 1 200); do
+        [[ -f "$AUTOSTART" ]] && break
+        sleep 0.05
+    done
+    test -f "$AUTOSTART"
+    test -f "$REPLIED"
+    python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+config = Path(os.environ["XDG_CONFIG_HOME"]) / "crosshair" / "config.json"
+assert json.loads(config.read_text(encoding="utf-8"))["enabled"] is True
+print("PASS: autostart ran after the pending preview completed and its auto-save persisted")
+PY
+
+    echo "[5] verify WM_DELETE_WINDOW and request a normal window close"
     xprop -id "$window" WM_PROTOCOLS || true
     "$close_helper" "$window"
     for _ in $(seq 1 180); do
