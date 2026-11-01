@@ -72,6 +72,14 @@ On the user's Nobara/Plasma Wayland session:
   completion acknowledgement. A callback that has not started before timeout
   is cancelled; one already running but unfinished is reported as incomplete.
   Restart prepares the pipe handoff up front and has a watchdog fallback.
+- Reproduced an installed-module mismatch: the installer updated
+  `crosshair.py` but left an older `crosshair_core.py`, causing startup to
+  crash on a missing core helper. The installer now copies both modules,
+  core first and frontend last; uninstall removes both. Regression tests
+  verify the copied core matches the source and symlinked core sources are
+  refused. Reinstalled on the target PC and verified both installed module
+  hashes match the repository, the required APIs import, and the daemon
+  starts successfully.
 - Corrected the generated app-menu entry and the existing
   `~/Desktop/crosshair.desktop` shortcut to launch the interactive settings
   path (no `--daemon --no-ui`). Kept login autostart headless. All three

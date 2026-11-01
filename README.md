@@ -135,6 +135,7 @@ legacy unit automatically.
 | Lock | `$XDG_RUNTIME_DIR/crosshair/daemon.lock` |
 | Log | `${XDG_STATE_HOME:-~/.local/state}/crosshair/crosshair.log` |
 | Installed script | `${XDG_DATA_HOME:-~/.local/share}/crosshair/crosshair.py` |
+| Installed core | `${XDG_DATA_HOME:-~/.local/share}/crosshair/crosshair_core.py` |
 | Launcher | `~/.local/bin/crosshair` |
 | App-menu entry | `${XDG_DATA_HOME:-~/.local/share}/applications/crosshair.desktop` |
 | Desktop shortcut | `$(xdg-user-dir DESKTOP)/crosshair.desktop` |

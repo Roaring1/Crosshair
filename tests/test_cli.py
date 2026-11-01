@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -114,6 +115,7 @@ def test_uninstall_removes_desktop_shortcut(tmp_path, monkeypatch):
         paths.application_entry,
         paths.bin_file,
         paths.installed_source,
+        paths.installed_source.with_name("crosshair_core.py"),
         crosshair.desktop_shortcut_path(),
     ]
     for artifact in artifacts:
@@ -155,7 +157,29 @@ def test_desktop_shortcut_installs_interactive_exec(tmp_path, monkeypatch):
     assert f'Exec="{paths.bin_file}"' in content
     assert "--daemon" not in content
     assert paths.installed_source.is_file()
+    installed_core = paths.installed_source.with_name("crosshair_core.py")
+    source_core = Path(crosshair.__file__).with_name("crosshair_core.py")
+    assert installed_core.read_bytes() == source_core.read_bytes()
     assert paths.bin_file.is_file()
+
+
+def test_install_self_refuses_symlink_core_module(tmp_path, monkeypatch):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    source = source_dir / "crosshair.py"
+    source.write_text("# frontend\\n", encoding="utf-8")
+    real_core = tmp_path / "real_core.py"
+    real_core.write_text("# core\\n", encoding="utf-8")
+    (source_dir / "crosshair_core.py").symlink_to(real_core)
+    monkeypatch.setattr(crosshair, "__file__", str(source))
+
+    paths = app_paths(tmp_path)
+    with pytest.raises(core.CoreError, match="symlink core module"):
+        crosshair.install_self(paths)
+
+    assert not paths.installed_source.exists()
+    assert not paths.installed_source.with_name("crosshair_core.py").exists()
+    assert not paths.bin_file.exists()
 
 
 def test_autostart_installs_headless_exec(tmp_path, monkeypatch):

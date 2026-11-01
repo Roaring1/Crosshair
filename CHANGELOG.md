@@ -39,6 +39,11 @@
 - **Fixed:** large diagonal `X` and `X-dot` crosshairs now allocate enough
   window space for their radial endpoints. The settings preview scales large
   designs to fit its preview area without changing the actual overlay size.
+- **Fixed:** the installer now deploys `crosshair_core.py` beside
+  `crosshair.py`. Previously it updated only the frontend, leaving an
+  older installed core module behind; the new frontend then crashed at
+  startup when it imported helpers missing from that stale module. Core is
+  installed before the frontend, and both modules are removed on uninstall.
 - **Fixed:** uninstall now removes the generated Desktop shortcut. Purging
   configuration is recursive, refuses a symlinked config root, and never
   follows symlinks inside the config tree.

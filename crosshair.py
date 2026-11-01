@@ -240,6 +240,25 @@ def install_self(paths: core.AppPaths) -> tuple[Path, Path]:
         raise core.CoreError(f"Cannot resolve source script {source}: {exc}") from exc
     if not src.is_file():
         raise core.CoreError(f"Source script is not a regular file: {src}")
+
+    core_source = source.with_name("crosshair_core.py")
+    if core_source.is_symlink():
+        raise core.CoreError(f"Refusing to install from symlink core module: {core_source}")
+    try:
+        core_src = core_source.resolve(strict=True)
+    except OSError as exc:
+        raise core.CoreError(f"Cannot resolve core module {core_source}: {exc}") from exc
+    if not core_src.is_file():
+        raise core.CoreError(f"Core module is not a regular file: {core_src}")
+
+    # crosshair.py imports crosshair_core from the installed script directory.
+    # Install the backward-compatible core first and the frontend last, so a
+    # failed frontend write cannot leave a new frontend paired with an old API.
+    core.atomic_write_bytes(
+        paths.installed_source.with_name("crosshair_core.py"),
+        core_src.read_bytes(),
+        mode=0o644,
+    )
     core.atomic_write_bytes(paths.installed_source, src.read_bytes(), mode=0o644)
     launcher = f'#!/usr/bin/env bash\nexec python3 "{paths.installed_source}" "$@"\n'
     core.atomic_write_text(paths.bin_file, launcher, mode=0o755)
@@ -318,6 +337,7 @@ def uninstall_app(paths: core.AppPaths) -> list[str]:
         desktop_shortcut_path(),
         paths.bin_file,
         paths.installed_source,
+        paths.installed_source.with_name("crosshair_core.py"),
     )
     for p in targets:
         try:
@@ -1524,8 +1544,8 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
                 buttons=Gtk.ButtonsType.YES_NO, text="Uninstall Crosshair?",
             )
             dlg.format_secondary_text(
-                "This removes the installed script, launcher, app-menu entry, "
-                "Desktop shortcut, and autostart entry. Your configuration file is kept.\n"
+                "This removes the installed script and core module, launcher, app-menu "
+                "entry, Desktop shortcut, and autostart entry. Your configuration file is kept.\n"
                 "The currently running overlay keeps running until you quit it."
             )
             resp = dlg.run()
