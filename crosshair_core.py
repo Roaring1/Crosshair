@@ -6,17 +6,19 @@ No import-time writes, sockets, display access, migration, or process signals.
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import json
 import logging
 import math
 import os
 import re
+import secrets
 import socket
+import stat
 import struct
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -29,6 +31,7 @@ APP_ID = "crosshair"
 APP_NAME = "Crosshair"
 APP_VERSION = "3.2.0-candidate"
 MAX_IPC_BYTES = 64 * 1024
+MAX_CONFIG_BYTES = 1024 * 1024
 MAX_STRING_LENGTH = 256
 SOCKET_PATH_LIMIT = 100
 
@@ -39,6 +42,9 @@ class CoreError(RuntimeError):
     pass
 
 class ConfigError(CoreError):
+    pass
+
+class ConfigTooLarge(ConfigError):
     pass
 
 class AlreadyRunning(CoreError):
@@ -87,7 +93,8 @@ class AppPaths:
         runtime_candidate = Path(runtime_raw).expanduser() if runtime_raw else None
         runtime_valid = bool(runtime_candidate and runtime_candidate.is_absolute())
         runtime_home = runtime_candidate if runtime_valid else cache_home / "runtime"
-        assert runtime_home is not None
+        if runtime_home is None:
+            raise CoreError("Could not resolve a runtime directory")
 
         config_dir = config_home / APP_ID
         runtime_dir = runtime_home / APP_ID
@@ -115,9 +122,33 @@ def ensure_directory(path: Path, mode: int = 0o700) -> Path:
     if path.is_symlink():
         raise CoreError(f"Refusing symlink directory: {path}")
     path.mkdir(parents=True, exist_ok=True, mode=mode)
-    if not path.is_dir() or path.is_symlink():
-        raise CoreError(f"Not a safe directory: {path}")
-    path.chmod(mode)
+
+    # Open the directory itself without following a last-component symlink,
+    # then chmod the verified inode through its file descriptor. A path swap
+    # between a separate is_symlink() check and chmod() must not redirect the
+    # permission change to an attacker-selected target.
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise CoreError(f"Could not safely open directory {path}: {exc}") from exc
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISDIR(opened.st_mode):
+            raise CoreError(f"Not a directory: {path}")
+        os.fchmod(fd, mode)
+        try:
+            current = path.lstat()
+        except OSError as exc:
+            raise CoreError(f"Directory changed during validation: {path}") from exc
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise CoreError(f"Directory changed during validation: {path}")
+    finally:
+        os.close(fd)
     return path
 
 def ensure_runtime(paths: AppPaths) -> None:
@@ -126,46 +157,145 @@ def ensure_runtime(paths: AppPaths) -> None:
     if length >= SOCKET_PATH_LIMIT:
         raise CoreError(f"AF_UNIX path too long ({length} bytes): {paths.socket_file}")
 
-def _fsync_directory(path: Path) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    try:
-        fd = os.open(path, flags)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
 def atomic_write_bytes(path: Path, data: bytes, *, mode: int = 0o600) -> None:
     path = Path(path)
+    if not path.name or path.name in {".", ".."}:
+        raise CoreError(f"Invalid atomic-write destination: {path}")
     if path.parent.is_symlink():
         raise CoreError(f"Refusing symlink parent: {path.parent}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.is_symlink():
-        raise CoreError(f"Refusing symlink destination: {path}")
 
-    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temp = Path(temp_name)
-    fd_open = True
+    # Pin the parent directory. All operations below are relative to this
+    # descriptor, so a rename/symlink swap of the parent pathname cannot
+    # redirect the temporary file, replacement, or cleanup elsewhere.
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    dir_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        os.fchmod(fd, mode)
-        with os.fdopen(fd, "wb") as handle:
-            fd_open = False
+        parent_fd = os.open(path.parent, dir_flags)
+    except OSError as exc:
+        raise CoreError(f"Could not safely open atomic-write parent {path.parent}: {exc}") from exc
+    parent_info = os.fstat(parent_fd)
+    if not stat.S_ISDIR(parent_info.st_mode):
+        os.close(parent_fd)
+        raise CoreError(f"Atomic-write parent is not a directory: {path.parent}")
+
+    temp_name: str | None = None
+    file_fd = -1
+    try:
+        try:
+            existing = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if stat.S_ISLNK(existing.st_mode):
+                raise CoreError(f"Refusing symlink destination: {path}")
+            if not stat.S_ISREG(existing.st_mode):
+                raise CoreError(f"Refusing non-regular destination: {path}")
+
+        file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        file_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        for _attempt in range(100):
+            candidate = f".{path.name}.{secrets.token_hex(12)}.tmp"
+            try:
+                file_fd = os.open(
+                    candidate,
+                    file_flags,
+                    mode,
+                    dir_fd=parent_fd,
+                )
+                temp_name = candidate
+                break
+            except FileExistsError:
+                continue
+            except OSError as exc:
+                try:
+                    current_parent = path.parent.lstat()
+                except OSError:
+                    current_parent = None
+                if (
+                    current_parent is None
+                    or not stat.S_ISDIR(current_parent.st_mode)
+                    or (current_parent.st_dev, current_parent.st_ino)
+                    != (parent_info.st_dev, parent_info.st_ino)
+                ):
+                    raise CoreError(
+                        f"Atomic-write parent changed before temporary-file creation: {path.parent}"
+                    ) from exc
+                raise CoreError(
+                    f"Could not safely create temporary file for {path}: {exc}"
+                ) from exc
+        if file_fd < 0 or temp_name is None:
+            raise CoreError(f"Could not allocate a unique temporary file for {path}")
+
+        os.fchmod(file_fd, mode)
+        with os.fdopen(file_fd, "wb") as handle:
+            file_fd = -1
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        if path.is_symlink():
-            raise CoreError(f"Destination became a symlink: {path}")
-        os.replace(temp, path)
-        path.chmod(mode)
-        _fsync_directory(path.parent)
-    finally:
-        if fd_open:
+
+        # Recheck the entry without following it. If an attacker races this
+        # check, renameat-style replacement still replaces the link itself,
+        # never its target.
+        try:
+            existing = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if stat.S_ISLNK(existing.st_mode):
+                raise CoreError(f"Destination became a symlink: {path}")
+            if not stat.S_ISREG(existing.st_mode):
+                raise CoreError(f"Destination became non-regular: {path}")
+
+        try:
+            current_parent = path.parent.lstat()
+        except OSError as exc:
+            raise CoreError(f"Atomic-write parent changed before commit: {path.parent}") from exc
+        if (
+            not stat.S_ISDIR(current_parent.st_mode)
+            or (current_parent.st_dev, current_parent.st_ino)
+            != (parent_info.st_dev, parent_info.st_ino)
+        ):
+            raise CoreError(f"Atomic-write parent changed before commit: {path.parent}")
+
+        os.replace(
+            temp_name,
+            path.name,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+        )
+        temp_name = None
+        os.fsync(parent_fd)
+        try:
+            current_parent = path.parent.lstat()
+        except OSError as exc:
+            current_parent = None
+            parent_error = exc
+        else:
+            parent_error = None
+        if (
+            current_parent is None
+            or not stat.S_ISDIR(current_parent.st_mode)
+            or (current_parent.st_dev, current_parent.st_ino)
+            != (parent_info.st_dev, parent_info.st_ino)
+        ):
+            # The write stayed confined to the pinned directory descriptor,
+            # but the user-visible parent path changed during commit. Remove
+            # the just-written entry from the pinned directory and report it.
             with contextlib.suppress(OSError):
-                os.close(fd)
-        with contextlib.suppress(OSError):
-            temp.unlink(missing_ok=True)
+                os.unlink(path.name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+            raise CoreError(
+                f"Atomic-write parent changed during commit: {path.parent}"
+            ) from parent_error
+    finally:
+        if file_fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(file_fd)
+        if temp_name is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(temp_name, dir_fd=parent_fd)
+        os.close(parent_fd)
 
 def atomic_write_text(path: Path, text: str, *, mode: int = 0o600) -> None:
     atomic_write_bytes(path, text.encode("utf-8"), mode=mode)
@@ -322,26 +452,104 @@ class ConfigLoadResult:
     corrupt_copy: Path | None = None
     error: str | None = None
 
+def _read_config_bytes_nofollow(path: Path) -> bytes | None:
+    """Read a regular config file without following a symlink at open time."""
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    # Opening a FIFO must not block this startup path; fstat rejects it below.
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ConfigError(f"Refusing symlink config: {path}") from exc
+        raise
+
+    owned_fd = fd
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ConfigError(f"Refusing non-regular config file: {path}")
+        if info.st_size > MAX_CONFIG_BYTES:
+            raise ConfigTooLarge(
+                f"Config file exceeds the {MAX_CONFIG_BYTES}-byte safety limit: {path}"
+            )
+        with os.fdopen(fd, "rb") as handle:
+            owned_fd = -1
+            raw_bytes = handle.read(MAX_CONFIG_BYTES + 1)
+            if len(raw_bytes) > MAX_CONFIG_BYTES:
+                raise ConfigTooLarge(
+                    f"Config file grew beyond the {MAX_CONFIG_BYTES}-byte safety limit: {path}"
+                )
+            return raw_bytes
+    finally:
+        if owned_fd >= 0:
+            os.close(owned_fd)
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> JsonObject:
+    """Build a JSON object while rejecting duplicate keys at every depth."""
+    result: JsonObject = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    """Reject Python JSON decoder extensions that are not valid JSON."""
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
 def load_config(path: Path, log: logging.Logger | None = None) -> ConfigLoadResult:
     path = Path(path)
-    if not path.exists():
-        return ConfigLoadResult(default_config())
-    if path.is_symlink():
-        raise ConfigError(f"Refusing symlink config: {path}")
     try:
-        raw_bytes = path.read_bytes()
-        parsed = json.loads(raw_bytes.decode("utf-8"))
-        if isinstance(parsed, Mapping):
-            unknown = set(parsed) - ALLOWED_TOP
-            if unknown and log:
-                log.warning("Ignoring unknown config keys: %s", sorted(unknown))
+        raw_bytes = _read_config_bytes_nofollow(path)
+    except ConfigTooLarge as exc:
+        # Keep the original oversized file untouched and avoid making another
+        # potentially huge backup. The app can continue with in-memory defaults.
+        if log:
+            log.error("%s; original file left untouched", exc)
+        return ConfigLoadResult(
+            default_config(),
+            True,
+            None,
+            f"{exc}; original file left untouched",
+        )
+    except ConfigError:
+        raise
+    except OSError as exc:
+        raise ConfigError(f"Could not read config safely: {exc}") from exc
+
+    if raw_bytes is None:
+        return ConfigLoadResult(default_config())
+
+    try:
+        parsed = json.loads(
+            raw_bytes.decode("utf-8"),
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+        )
+        if not isinstance(parsed, Mapping):
+            raise ConfigError("Configuration must be a JSON object")
+        unknown = set(parsed) - ALLOWED_TOP
+        if unknown and log:
+            log.warning("Ignoring unknown config keys: %s", sorted(unknown))
         return ConfigLoadResult(sanitize_config(parsed))
-    except (OSError, UnicodeError, json.JSONDecodeError, ConfigError, ValueError) as exc:
+    except (UnicodeError, json.JSONDecodeError, ConfigError, ValueError, RecursionError) as exc:
         stamp = time.strftime("%Y%m%dT%H%M%S", time.localtime())
-        backup = path.with_name(f"{path.name}.corrupt-{stamp}-{os.getpid()}")
+        backup = path.with_name(
+            f"{path.name}.corrupt-{stamp}-{os.getpid()}-{time.time_ns()}"
+        )
         try:
-            atomic_write_bytes(backup, path.read_bytes(), mode=0o600)
-        except OSError as preserve_error:
+            # Preserve the exact bytes read from the verified regular file;
+            # never reopen the source path and accidentally follow a swapped symlink.
+            atomic_write_bytes(backup, raw_bytes, mode=0o600)
+        except (OSError, CoreError) as preserve_error:
             raise ConfigError(
                 f"Invalid config could not be preserved: {preserve_error}"
             ) from exc
@@ -435,6 +643,33 @@ def monitor_cache_key(
     return ("fallback", width_mm, height_mm, int(fallback_identity), 0, 0, 0)
 
 
+class _NoFollowRotatingFileHandler(RotatingFileHandler):
+    """Rotating file logger that never opens a symlinked log destination."""
+
+    def _open(self):
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_NONBLOCK", 0)
+        try:
+            fd = os.open(self.baseFilename, flags, 0o600)
+        except OSError as exc:
+            raise CoreError(f"Could not safely open log file {self.baseFilename}: {exc}") from exc
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise CoreError(f"Refusing non-regular log file: {self.baseFilename}")
+            os.fchmod(fd, 0o600)
+            return os.fdopen(
+                fd,
+                self.mode,
+                encoding=self.encoding,
+                errors=self.errors,
+            )
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise
+
+
 def setup_logging(paths: AppPaths, *, verbose: bool = False) -> logging.Logger:
     ensure_directory(paths.state_dir, 0o700)
     if paths.log_file.is_symlink():
@@ -448,10 +683,9 @@ def setup_logging(paths: AppPaths, *, verbose: bool = False) -> logging.Logger:
     formatter = logging.Formatter(
         "%(asctime)s %(levelname)s %(threadName)s %(name)s: %(message)s"
     )
-    file_handler = RotatingFileHandler(
+    file_handler = _NoFollowRotatingFileHandler(
         paths.log_file, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
     )
-    paths.log_file.chmod(0o600)
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
     if verbose:
@@ -472,9 +706,16 @@ class DaemonLock:
         if path.is_symlink():
             raise CoreError(f"Refusing symlink lock: {path}")
         flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         fd = os.open(path, flags, 0o600)
-        handle = os.fdopen(fd, "r+", encoding="utf-8")
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise CoreError(f"Refusing non-regular lock file: {path}")
+            handle = os.fdopen(fd, "r+", encoding="utf-8")
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -500,7 +741,9 @@ class DaemonLock:
             self.handle.close()
 
 def encode_line(payload: Mapping[str, Any]) -> bytes:
-    data = (json.dumps(dict(payload), separators=(",", ":")) + "\n").encode("utf-8")
+    data = (
+        json.dumps(dict(payload), separators=(",", ":"), allow_nan=False) + "\n"
+    ).encode("utf-8")
     if len(data) > MAX_IPC_BYTES:
         raise ProtocolError("IPC message is too large")
     return data
@@ -523,8 +766,12 @@ def recv_line(conn: socket.socket) -> bytes:
 
 def decode_object(raw: bytes) -> JsonObject:
     try:
-        value = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
         raise ProtocolError(f"Invalid JSON: {exc}") from exc
     if not isinstance(value, dict):
         raise ProtocolError("IPC message must be an object")
@@ -545,7 +792,7 @@ class IpcServer:
         self.log = log
         self.lock: DaemonLock | None = None
         self.sock: socket.socket | None = None
-        self.socket_inode: int | None = None
+        self.socket_identity: tuple[int, int] | None = None
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
 
@@ -556,17 +803,38 @@ class IpcServer:
         if self.lock is None:
             raise AlreadyRunning("Crosshair daemon is already running")
         try:
-            if self.paths.socket_file.is_symlink():
-                raise CoreError(f"Refusing symlink socket: {self.paths.socket_file}")
-            self.paths.socket_file.unlink(missing_ok=True)
+            try:
+                existing_socket_path = self.paths.socket_file.lstat()
+            except FileNotFoundError:
+                existing_socket_path = None
+            if existing_socket_path is not None:
+                if stat.S_ISLNK(existing_socket_path.st_mode):
+                    raise CoreError(f"Refusing symlink socket: {self.paths.socket_file}")
+                if not stat.S_ISSOCK(existing_socket_path.st_mode):
+                    raise CoreError(
+                        f"Refusing to remove non-socket IPC path: {self.paths.socket_file}"
+                    )
+                self.paths.socket_file.unlink()
             self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            old_umask = os.umask(0o077)
+            # Unix socket nodes are created as 0777 & umask. Create with
+            # exact owner-only permissions at bind time so no post-bind
+            # path-based chmod can be redirected by a symlink swap.
+            old_umask = os.umask(0o177)
             try:
                 self.sock.bind(str(self.paths.socket_file))
             finally:
                 os.umask(old_umask)
-            self.socket_inode = self.paths.socket_file.lstat().st_ino
-            self.paths.socket_file.chmod(0o600)
+            socket_info = self.paths.socket_file.lstat()
+            if (
+                not stat.S_ISSOCK(socket_info.st_mode)
+                or socket_info.st_uid != os.getuid()
+                or socket_info.st_mode & 0o077
+            ):
+                raise CoreError(
+                    f"Bound IPC socket has unexpected type, owner, or permissions: "
+                    f"{self.paths.socket_file}"
+                )
+            self.socket_identity = (socket_info.st_dev, socket_info.st_ino)
             self.sock.listen(16)
             self.sock.settimeout(0.5)
             self.thread = threading.Thread(
@@ -596,7 +864,9 @@ class IpcServer:
                 conn.settimeout(1.0)
                 try:
                     uid = peer_uid(conn)
-                    if uid is not None and uid != os.getuid():
+                    if uid is None:
+                        raise ProtocolError("Peer credential verification is unavailable")
+                    if uid != os.getuid():
                         raise ProtocolError(f"Rejected peer uid {uid}")
                     request = decode_object(recv_line(conn))
                     if not isinstance(request.get("cmd"), str):
@@ -618,15 +888,20 @@ class IpcServer:
 
     def _cleanup_socket(self) -> None:
         sock, self.sock = self.sock, None
-        expected_inode, self.socket_inode = self.socket_inode, None
+        expected_identity, self.socket_identity = self.socket_identity, None
         if sock:
             with contextlib.suppress(OSError):
                 sock.close()
+        if expected_identity is None:
+            return
         try:
-            inode = self.paths.socket_file.lstat().st_ino
+            current = self.paths.socket_file.lstat()
         except OSError:
             return
-        if expected_inode is not None and inode == expected_inode:
+        if (
+            stat.S_ISSOCK(current.st_mode)
+            and (current.st_dev, current.st_ino) == expected_identity
+        ):
             self.paths.socket_file.unlink(missing_ok=True)
 
     def stop(self) -> None:

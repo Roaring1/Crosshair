@@ -2,6 +2,29 @@
 
 ## Unreleased — 31/10/2026
 
+- **Hardened:** the daemon lock opens nonblocking with `O_NOFOLLOW` and accepts only regular files; FIFO and device-node paths are rejected before flock or file mutation. Lock descriptors are closed on every validation failure.
+- **Hardened:** daemon shutdown removes only the exact socket it created, matching device, inode and socket type. A replacement file at the socket path is retained.
+- **Added:** a FIFO lock-path regression test verifies this rejection does not block daemon startup.
+
+- **Hardened:** config and IPC JSON parsing now reject duplicate object keys at every nesting level and reject non-standard `NaN`/`Infinity` constants. Deeply nested config input is recovered as invalid data rather than escaping as an uncaught recursion error; the exact original bytes are preserved within the bounded size limit.
+- **Added:** regression tests cover duplicate config/IPC keys, nested duplicate keys, non-standard numeric constants, IPC encoder rejection, and deeply nested config recovery.
+
+- **Hardened:** atomic file writes now pin the parent directory with `O_NOFOLLOW`, create unpredictable `O_EXCL` temporary files, and perform rename/cleanup relative to the pinned directory descriptor. Parent-directory replacement is detected and fails closed; non-regular destinations are refused.
+- **Hardened:** log files are opened with `O_NOFOLLOW|O_NONBLOCK`, verified as regular files, and permissioned through their open descriptor. The IPC socket is created owner-only at bind time and startup refuses to delete a regular file or other non-socket entry at its pathname.
+- **Hardened:** config reads are capped at 1 MiB. Oversized files remain untouched, are not copied into a second large backup, and Crosshair continues with in-memory defaults while reporting the issue.
+- **Added:** parent-directory replacement, FIFO log, non-socket IPC entry and oversized-config tests exercise these additional denial-of-service and path-redirection boundaries.
+
+- **Hardened:** system helper programs are resolved only from root-owned system directories and must not be writable by the current user (including through supplementary groups or ACLs). User-writable PATH lookalikes are never executed. Legacy systemd unit files are retained unless both trusted disable and daemon-reload operations succeed.
+- **Hardened:** application directories are opened with `O_NOFOLLOW` and permissioned through verified directory descriptors. Log files now open with `O_NOFOLLOW` and receive mode 0600 through their open descriptor. The local IPC socket is created with mode 0600 via the bind-time umask, without a post-bind pathname chmod.
+- **Added:** adversarial tests cover directory chmod and log-open symlink races, trusted system executable resolution, systemd cleanup failures, and hostile desktop command paths. A real `desktop-file-validate` run accepts the reserved-character Exec test case.
+
+- **Hardened:** config files are opened with `O_NOFOLLOW`; symlink and non-regular destinations are refused at open time. Invalid non-object JSON is preserved as a corrupt backup rather than silently replaced with defaults.
+- **Hardened:** atomic writes no longer chmod the destination after rename, closing a symlink-swap window in which a raced destination could redirect the permission change to another file.
+- **Hardened:** installed POSIX launchers quote both the interpreter and script path with shell-safe argument quoting. Desktop `Exec` paths now escape quotes, backslashes, dollar signs, backticks and literal field-code percent signs, and reject control characters and unsupported executable paths.
+- **Hardened:** local IPC fails closed when peer credentials cannot be verified.
+- **Added:** exploit-oriented tests cover symlink reads (including dangling links), non-regular config files, atomic-write symlink swaps, desktop field-code escaping, shell injection through hostile install paths and missing peer credentials.
+- **Added:** Bandit medium/high severity analysis and `pip-audit` dependency vulnerability scanning to CI, pinned development tool versions, immutable GitHub Actions references, and weekly Dependabot updates. The current pinned development dependencies audit with no known vulnerabilities.
+
 - **Fixed:** legacy `purplecrosshair` config migration now creates or verifies
   the destination config directory with mode 0700 before writing the mode-0600
   file. A symlinked destination is refused and logged rather than followed.

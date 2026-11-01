@@ -167,13 +167,15 @@ Use a virtual environment so test/lint tools do not modify the system Python:
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install --upgrade pip pytest ruff
+python -m pip install --requirement requirements-dev.txt
 ruff check .
+bandit -q -r crosshair.py crosshair_core.py -ll
+pip-audit -r requirements-dev.txt
 python -m compileall -q crosshair.py crosshair_core.py tests
 python -m pytest -q
 ```
 
-GitHub Actions runs the same lint/compile/test checks on Python 3.10–3.14.
+GitHub Actions runs the pinned lint, medium/high Bandit security scan, compile, and test checks on Python 3.10–3.14. Dependabot checks the pinned action and development-tool versions weekly.
 
 `crosshair_core.py` is a GTK-free module (paths, atomic config I/O,
 the single-instance lock, IPC protocol, and bounded GTK-dispatch helper).

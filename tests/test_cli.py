@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -144,6 +146,139 @@ def test_install_self_refuses_symlink_source(tmp_path, monkeypatch):
     assert not paths.bin_file.exists()
 
 
+def test_desktop_entry_exec_escapes_reserved_characters_and_field_codes():
+    path = Path('/tmp/Crosshair 100% $HOME `command` "quoted"\\backslash')
+    command = crosshair._desktop_entry_exec(path)
+
+    assert command.startswith('"') and command.endswith('"')
+    assert "100%%" in command
+    assert r"\\$HOME" in command
+    assert r"\\`command\\`" in command
+    assert r'\\\"quoted\\\"' in command
+    assert r"\\\\backslash" in command
+
+
+@pytest.mark.parametrize("path", [Path("/tmp/Crosshair=unsafe"), Path("/tmp/Crosshair\nExec=Bad")])
+def test_desktop_entry_exec_rejects_unsafe_executable_paths(path):
+    with pytest.raises(core.CoreError, match=r"cannot contain|control characters"):
+        crosshair._desktop_entry_exec(path)
+
+
+def test_desktop_entry_string_escapes_literal_backslashes():
+    assert crosshair._desktop_entry_string(Path(r"/tmp/Crosshair\\folder")) == (
+        r"/tmp/Crosshair\\\\folder"
+    )
+
+
+def test_trusted_executable_accepts_root_owned_system_binary():
+    executable = crosshair._trusted_executable("python3")
+    if executable is None:
+        pytest.skip("no trusted system Python binary in configured system directories")
+    path = Path(executable)
+    info = path.stat()
+    assert path.is_absolute()
+    assert path.is_file()
+    assert info.st_uid == 0
+
+
+def test_trusted_executable_rejects_user_owned_path_lookalike(tmp_path, monkeypatch):
+    lookalike = tmp_path / "xdg-open"
+    lookalike.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+    lookalike.chmod(0o755)
+    monkeypatch.setattr(crosshair, "_TRUSTED_SYSTEM_BIN_DIRS", (tmp_path,))
+
+    assert crosshair._trusted_executable("xdg-open") is None
+    assert crosshair._trusted_executable("../xdg-open") is None
+
+
+@pytest.mark.parametrize("failure", ["disable", "daemon-reload"])
+def test_legacy_systemd_unit_is_preserved_when_cleanup_fails(
+    tmp_path, monkeypatch, failure
+):
+    home = tmp_path / "home"
+    unit = home / ".config" / "systemd" / "user" / "crosshair.service"
+    unit.parent.mkdir(parents=True)
+    unit.write_text("[Service]\nExecStart=/old/crosshair\n", encoding="utf-8")
+
+    systemctl = tmp_path / "systemctl"
+    systemctl.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$2" = "{failure}" ]; then exit 1; fi\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    systemctl.chmod(0o755)
+    monkeypatch.setattr(crosshair.Path, "home", classmethod(lambda _cls: home))
+    monkeypatch.setattr(
+        crosshair,
+        "_trusted_executable",
+        lambda name: str(systemctl) if name == "systemctl" else None,
+    )
+
+    assert crosshair._remove_legacy_systemd_unit() == []
+    assert unit.read_text(encoding="utf-8") == "[Service]\nExecStart=/old/crosshair\n"
+
+
+def test_install_rejects_unsupported_exec_path_before_writing(tmp_path):
+    home = tmp_path / "home=unsupported"
+    paths = core.AppPaths.from_env({
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+        "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+        "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+    })
+
+    with pytest.raises(core.CoreError, match="cannot contain"):
+        crosshair.install_self(paths)
+
+    assert not paths.installed_source.exists()
+    assert not paths.installed_source.with_name("crosshair_core.py").exists()
+    assert not paths.bin_file.exists()
+
+
+def test_installed_launcher_treats_paths_as_data_not_shell_syntax(tmp_path, monkeypatch):
+    marker_name = "shell-injection-fired"
+    marker = tmp_path / marker_name
+    home = tmp_path / f"home $(touch {marker_name}) `touch {marker_name}` 'quoted'"
+    home.mkdir()
+    paths = core.AppPaths.from_env({
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+        "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+        "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+    })
+
+    captured = tmp_path / "captured-arguments"
+    fake_interpreter = tmp_path / "fake interpreter 'with spaces'"
+    fake_interpreter.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$@\" > {shlex.quote(str(captured))}\n",
+        encoding="utf-8",
+    )
+    fake_interpreter.chmod(0o755)
+    monkeypatch.setattr(crosshair.sys, "executable", str(fake_interpreter))
+    monkeypatch.setattr(crosshair, "_validate_desktop_file", lambda _path: None)
+
+    crosshair.install_self(paths)
+    injected_argument = f"$(touch {marker_name})"
+    subprocess.run(
+        [str(paths.bin_file), "argument with spaces", injected_argument],
+        check=True,
+        cwd=tmp_path,
+        timeout=5,
+    )
+
+    assert captured.read_text(encoding="utf-8").splitlines() == [
+        str(paths.installed_source),
+        "argument with spaces",
+        injected_argument,
+    ]
+    assert not marker.exists()
+    assert paths.bin_file.read_text(encoding="utf-8").startswith("#!/bin/sh\n")
+
+
 def test_desktop_shortcut_installs_interactive_exec(tmp_path, monkeypatch):
     paths = app_paths(tmp_path)
     desktop_dir = tmp_path / "Desktop"
@@ -229,7 +364,11 @@ def test_desktop_dir_ignores_relative_xdg_user_dir(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     monkeypatch.setattr(crosshair.Path, "home", classmethod(lambda _cls: tmp_path))
-    monkeypatch.setattr(crosshair.shutil, "which", lambda _command: "/bin/xdg-user-dir")
+    monkeypatch.setattr(
+        crosshair,
+        "_trusted_executable",
+        lambda name: "/usr/bin/xdg-user-dir" if name == "xdg-user-dir" else None,
+    )
     monkeypatch.setattr(
         crosshair.subprocess,
         "run",

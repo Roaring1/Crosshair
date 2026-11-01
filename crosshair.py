@@ -40,8 +40,10 @@ import json
 import logging
 import math
 import os
+import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -153,15 +155,106 @@ def _preview_scale(config: dict, width: float, height: float, padding: float = 8
 
 def _desktop_entry_exec(bin_path: Path, *, daemon: bool = False) -> str:
     # A normal application launch must activate/show the settings window.
-    # Only the XDG autostart entry should start a hidden background daemon.
-    # Desktop Entry Specification quoting: wrap in double quotes, escape
-    # embedded backslashes/quotes.
-    escaped = str(bin_path).replace("\\", "\\\\").replace('"', '\\"')
+    # Only XDG autostart starts a hidden background daemon.
+    # Desktop Entry Exec is not a shell command: it has its own quoting and
+    # field-code rules. Reject line/control injection and escape reserved
+    # characters, including literal % field-code markers.
+    value = str(bin_path)
+    if not value or any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        raise core.CoreError("Desktop launcher path contains control characters")
+    if "=" in value:
+        raise core.CoreError("Desktop launcher executable path cannot contain '='")
+    escaped = value.replace("\\", "\\\\\\\\")
+    escaped = (
+        escaped.replace('"', r'\\\"')
+        .replace("`", r"\\`")
+        .replace("$", r"\\$")
+        .replace("%", "%%")
+    )
     command = f'"{escaped}"'
     return f"{command} --daemon --no-ui" if daemon else command
 
+
+def _desktop_entry_string(value: str | Path) -> str:
+    """Escape a path stored as a Desktop Entry string value (not an Exec line)."""
+    text = str(value)
+    if not text or any(ord(char) < 0x20 or ord(char) == 0x7F for char in text):
+        raise core.CoreError("Desktop entry path contains control characters")
+    return text.replace("\\", "\\\\")
+
+
+_TRUSTED_SYSTEM_BIN_DIRS = tuple(
+    Path(directory)
+    for directory in (
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+    )
+)
+
+
+def _trusted_executable(name: str) -> str | None:
+    """Find a system tool without trusting a user-writable PATH entry."""
+    if not name or Path(name).name != name:
+        return None
+
+    for directory in _TRUSTED_SYSTEM_BIN_DIRS:
+        candidate = directory / name
+        try:
+            resolved = candidate.resolve(strict=True)
+            info = resolved.stat()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != 0
+                or os.access(resolved, os.W_OK)
+                or not os.access(resolved, os.X_OK)
+            ):
+                continue
+
+            # The executable and every parent directory must be root-owned
+            # and not writable by this user. os.access also accounts for
+            # supplementary groups and POSIX ACLs; a root-owned directory
+            # may be group-writable to a separate, restricted group.
+            safe = True
+            for parent in resolved.parents:
+                parent_info = parent.stat()
+                if (
+                    not stat.S_ISDIR(parent_info.st_mode)
+                    or parent_info.st_uid != 0
+                    or os.access(parent, os.W_OK)
+                ):
+                    safe = False
+                    break
+            if safe:
+                return str(resolved)
+        except OSError:
+            continue
+    return None
+
+
+def _open_path_with_default_app(path: str | Path) -> bool:
+    exe = _trusted_executable("xdg-open")
+    if exe is None:
+        return False
+    try:
+        subprocess.Popen(
+            [exe, str(path)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+        )
+        return True
+    except OSError:
+        return False
+
+
 def _validate_desktop_file(path: Path) -> None:
-    exe = shutil.which("desktop-file-validate")
+    exe = _trusted_executable("desktop-file-validate")
     if not exe:
         print(f"Note: desktop-file-validate not found; skipped validation of {path}",
               file=sys.stderr)
@@ -179,7 +272,7 @@ def _validate_desktop_file(path: Path) -> None:
         )
 
 def _desktop_dir() -> Path:
-    exe = shutil.which("xdg-user-dir")
+    exe = _trusted_executable("xdg-user-dir")
     if exe:
         try:
             result = subprocess.run([exe, "DESKTOP"], capture_output=True, text=True, timeout=3)
@@ -195,14 +288,32 @@ def _remove_legacy_systemd_unit() -> list[str]:
     removed = []
     unit = Path.home() / ".config" / "systemd" / "user" / f"{APP_ID}.service"
     if unit.exists() or unit.is_symlink():
+        systemctl = _trusted_executable("systemctl")
+        if systemctl is None:
+            # Do not execute a PATH-supplied systemctl lookalike, and do not
+            # remove a potentially active legacy unit without disabling it.
+            return removed
         try:
-            subprocess.run(["systemctl", "--user", "disable", "--now", f"{APP_ID}.service"],
-                           check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           timeout=5)
-            subprocess.run(["systemctl", "--user", "daemon-reload"], check=False,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+            disabled = subprocess.run(
+                [systemctl, "--user", "disable", "--now", f"{APP_ID}.service"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+            if disabled.returncode != 0:
+                return removed
+            reloaded = subprocess.run(
+                [systemctl, "--user", "daemon-reload"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+            if reloaded.returncode != 0:
+                return removed
         except (OSError, subprocess.TimeoutExpired):
-            pass
+            return removed
         try:
             unit.unlink()
             removed.append(str(unit))
@@ -235,6 +346,9 @@ def _migrate_legacy_config(paths: core.AppPaths, log: logging.Logger) -> None:
         log.warning("Legacy config migration failed: %s", exc)
 
 def install_self(paths: core.AppPaths) -> tuple[Path, Path]:
+    # Validate the executable path before writing any of the paired install
+    # artifacts, so an unsupported desktop path cannot leave a partial install.
+    app_exec = _desktop_entry_exec(paths.bin_file)
     source = Path(__file__).absolute()
     if source.is_symlink():
         raise core.CoreError(f"Refusing to install from symlink source: {source}")
@@ -264,7 +378,14 @@ def install_self(paths: core.AppPaths) -> tuple[Path, Path]:
         mode=0o644,
     )
     core.atomic_write_bytes(paths.installed_source, src.read_bytes(), mode=0o644)
-    launcher = f'#!/usr/bin/env bash\nexec python3 "{paths.installed_source}" "$@"\n'
+    # Use POSIX shell quoting for both paths. Home/XDG paths are data and
+    # must never become shell syntax (for example: $(...), backticks, or
+    # embedded quotes). Keep the interpreter chosen for this install.
+    launcher = (
+        "#!/bin/sh\n"
+        f"exec {shlex.quote(sys.executable)} "
+        f"{shlex.quote(str(paths.installed_source))} \"$@\"\n"
+    )
     core.atomic_write_text(paths.bin_file, launcher, mode=0o755)
     app_entry = (
         "[Desktop Entry]\n"
@@ -272,7 +393,7 @@ def install_self(paths: core.AppPaths) -> tuple[Path, Path]:
         "Type=Application\n"
         f"Name={APP_NAME}\n"
         "Comment=Crosshair overlay for games without a built-in reticle\n"
-        f"Exec={_desktop_entry_exec(paths.bin_file)}\n"
+        f"Exec={app_exec}\n"
         "Icon=input-gaming\n"
         "Terminal=false\n"
         "Categories=Game;\n"
@@ -290,7 +411,7 @@ def install_autostart(paths: core.AppPaths, log: logging.Logger | None = None) -
         "Version=1.0\n"
         f"Name={APP_NAME}\n"
         "Comment=Crosshair overlay\n"
-        f"TryExec={bin_path}\n"
+        f"TryExec={_desktop_entry_string(bin_path)}\n"
         f"Exec={_desktop_entry_exec(bin_path, daemon=True)}\n"
         "Icon=input-gaming\n"
         "Terminal=false\n"
@@ -1513,12 +1634,12 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
 
         def _open_folder(self, path):
             with contextlib.suppress(Exception):
-                subprocess.Popen(["xdg-open", path])
+                _open_path_with_default_app(path)
 
         def _edit_config(self):
             _save_cfg()
             with contextlib.suppress(Exception):
-                subprocess.Popen(["xdg-open", str(paths.config_file)])
+                _open_path_with_default_app(paths.config_file)
 
         def _install_autostart(self):
             try:

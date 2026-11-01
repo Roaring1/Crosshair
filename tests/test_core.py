@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing as mp
+import os
 import socket
 import threading
 from pathlib import Path
@@ -160,6 +161,115 @@ def test_symlink_destination_rejected(tmp_path):
         core.atomic_write_text(link, "replace")
     assert real.read_text() == "keep"
 
+
+def test_logging_refuses_log_symlink_swapped_after_precheck(tmp_path, monkeypatch):
+    app = paths(tmp_path)
+    core.ensure_directory(app.state_dir)
+    target = tmp_path / "outside-log"
+    target.write_text("preserve", encoding="utf-8")
+    target.chmod(0o644)
+    original_open = core.os.open
+
+    def swap_before_open(path, flags, *args, **kwargs):
+        if Path(path) == app.log_file and not app.log_file.exists():
+            app.log_file.symlink_to(target)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(core.os, "open", swap_before_open)
+
+    with pytest.raises(core.CoreError, match="Could not safely open log"):
+        core.setup_logging(app)
+
+    assert app.log_file.is_symlink()
+    assert target.read_text(encoding="utf-8") == "preserve"
+    assert target.stat().st_mode & 0o777 == 0o644
+
+
+def test_logging_rejects_fifo_without_blocking(tmp_path):
+    app = paths(tmp_path)
+    core.ensure_directory(app.state_dir)
+    os.mkfifo(app.log_file)
+
+    with pytest.raises(core.CoreError, match="Could not safely open log"):
+        core.setup_logging(app)
+
+
+def test_atomic_write_does_not_chmod_a_swapped_symlink_target(tmp_path, monkeypatch):
+    destination = tmp_path / "config.json"
+    target = tmp_path / "external-target"
+    target.write_text("preserve", encoding="utf-8")
+    target.chmod(0o644)
+    original_replace = core.os.replace
+
+    def swap_destination_for_symlink(source, dest, **kwargs):
+        original_replace(source, dest, **kwargs)
+        os.unlink(dest, dir_fd=kwargs["dst_dir_fd"])
+        os.symlink(target, dest, dir_fd=kwargs["dst_dir_fd"])
+
+    monkeypatch.setattr(core.os, "replace", swap_destination_for_symlink)
+
+    core.atomic_write_bytes(destination, b"new config", mode=0o600)
+
+    assert destination.is_symlink()
+    assert target.read_text(encoding="utf-8") == "preserve"
+    assert target.stat().st_mode & 0o777 == 0o644
+
+
+def test_atomic_write_refuses_parent_swapped_to_symlink(tmp_path, monkeypatch):
+    directory = tmp_path / "private"
+    target = tmp_path / "external-directory"
+    target.mkdir()
+    sentinel = target / "keep.txt"
+    sentinel.write_text("preserve", encoding="utf-8")
+    original_open = core.os.open
+    swapped = False
+
+    def swap_parent_after_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        fd = original_open(path, flags, *args, **kwargs)
+        if Path(path) == directory and not swapped:
+            directory.rmdir()
+            directory.symlink_to(target, target_is_directory=True)
+            swapped = True
+        return fd
+
+    monkeypatch.setattr(core.os, "open", swap_parent_after_open)
+
+    with pytest.raises(core.CoreError, match="Atomic-write parent changed"):
+        core.atomic_write_bytes(directory / "config.json", b"attacker-controlled")
+
+    assert swapped is True
+    assert directory.is_symlink()
+    assert sentinel.read_text(encoding="utf-8") == "preserve"
+    assert sorted(path.name for path in target.iterdir()) == ["keep.txt"]
+
+
+def test_ensure_directory_does_not_chmod_a_swapped_symlink_target(tmp_path, monkeypatch):
+    directory = tmp_path / "private"
+    target = tmp_path / "external-directory"
+    target.mkdir()
+    target.chmod(0o755)
+    original_open = core.os.open
+    swapped = False
+
+    def swap_after_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        fd = original_open(path, flags, *args, **kwargs)
+        if Path(path) == directory and not swapped:
+            directory.rmdir()
+            directory.symlink_to(target, target_is_directory=True)
+            swapped = True
+        return fd
+
+    monkeypatch.setattr(core.os, "open", swap_after_open)
+
+    with pytest.raises(core.CoreError, match="Directory changed during validation"):
+        core.ensure_directory(directory, 0o700)
+
+    assert swapped is True
+    assert directory.is_symlink()
+    assert target.stat().st_mode & 0o777 == 0o755
+
 def test_corrupt_config_preserved(tmp_path):
     app = paths(tmp_path)
     core.ensure_directory(app.config_dir)
@@ -168,6 +278,109 @@ def test_corrupt_config_preserved(tmp_path):
     assert result.recovered is True
     assert result.corrupt_copy and result.corrupt_copy.read_text() == '{"enabled":true,'
     assert result.config == core.default_config()
+
+
+def test_oversized_config_is_not_read_or_backed_up(tmp_path):
+    app = paths(tmp_path)
+    core.ensure_directory(app.config_dir)
+    with app.config_file.open("wb") as handle:
+        handle.truncate(core.MAX_CONFIG_BYTES + 1)
+
+    result = core.load_config(app.config_file)
+
+    assert result.recovered is True
+    assert result.corrupt_copy is None
+    assert "safety limit" in result.error
+    assert app.config_file.stat().st_size == core.MAX_CONFIG_BYTES + 1
+    assert result.config == core.default_config()
+    assert list(app.config_dir.glob("*.corrupt-*")) == []
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_load_config_refuses_symlink_without_reading_target(tmp_path, dangling):
+    app = paths(tmp_path)
+    core.ensure_directory(app.config_dir)
+    target = tmp_path / "outside-config.json"
+    if not dangling:
+        target.write_text('{"enabled": false}', encoding="utf-8")
+    app.config_file.symlink_to(target)
+
+    with pytest.raises(core.ConfigError, match="symlink config"):
+        core.load_config(app.config_file)
+
+    if not dangling:
+        assert target.read_text(encoding="utf-8") == '{"enabled": false}'
+
+
+def test_load_config_rejects_non_regular_file(tmp_path):
+    app = paths(tmp_path)
+    core.ensure_directory(app.config_dir)
+    app.config_file.mkdir()
+
+    with pytest.raises(core.ConfigError, match="non-regular"):
+        core.load_config(app.config_file)
+
+
+def test_non_object_config_is_preserved_as_corrupt(tmp_path):
+    app = paths(tmp_path)
+    core.ensure_directory(app.config_dir)
+    app.config_file.write_text('["unexpected"]', encoding="utf-8")
+
+    result = core.load_config(app.config_file)
+
+    assert result.recovered is True
+    assert result.corrupt_copy is not None
+    assert result.corrupt_copy.read_text(encoding="utf-8") == '["unexpected"]'
+    assert result.config == core.default_config()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"enabled": true, "enabled": false}',
+        '{"outline": {"enabled": true, "enabled": false}}',
+        '{"opacity": NaN}',
+        '{"opacity": Infinity}',
+    ],
+)
+def test_config_rejects_ambiguous_or_nonstandard_json(tmp_path, raw):
+    app = paths(tmp_path)
+    core.ensure_directory(app.config_dir)
+    app.config_file.write_text(raw, encoding="utf-8")
+
+    result = core.load_config(app.config_file)
+
+    assert result.recovered is True
+    assert result.corrupt_copy is not None
+    assert result.corrupt_copy.read_text(encoding="utf-8") == raw
+    assert result.config == core.default_config()
+
+
+def test_deeply_nested_config_is_recovered_without_crashing(tmp_path):
+    app = paths(tmp_path)
+    core.ensure_directory(app.config_dir)
+    raw = "[" * 2000 + "0" + "]" * 2000
+    app.config_file.write_text(raw, encoding="utf-8")
+
+    result = core.load_config(app.config_file)
+
+    assert result.recovered is True
+    assert result.corrupt_copy is not None
+    assert result.corrupt_copy.read_text(encoding="utf-8") == raw
+    assert result.config == core.default_config()
+
+
+def test_decode_object_rejects_duplicate_keys_and_nonstandard_constants():
+    with pytest.raises(core.ProtocolError, match="duplicate JSON object key"):
+        core.decode_object(b'{"cmd":"status","cmd":"quit"}')
+    with pytest.raises(core.ProtocolError, match="non-standard JSON constant"):
+        core.decode_object(b'{"cmd":"set","value":NaN}')
+
+
+def test_encode_line_rejects_nonstandard_json_numbers():
+    with pytest.raises(ValueError, match="Out of range float"):
+        core.encode_line({"cmd": "set", "value": float("nan")})
+
 
 def _lock_worker(lock_path: str, ready, release, result):
     lock = core.DaemonLock.acquire(Path(lock_path))
@@ -243,6 +456,25 @@ def test_bad_json_does_not_kill_server(tmp_path):
     finally:
         server.stop()
 
+
+def test_ipc_duplicate_keys_are_rejected_before_handler(tmp_path):
+    app = paths(tmp_path)
+    log = core.setup_logging(app)
+    handled = []
+    server = core.IpcServer(app, lambda request: handled.append(request) or {"ok": True}, log)
+    server.start()
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.connect(str(app.socket_file))
+            client.sendall(b'{"cmd":"status","cmd":"quit"}\n')
+            response = json.loads(core.recv_line(client))
+        assert response["ok"] is False
+        assert "duplicate JSON object key" in response["message"]
+        assert handled == []
+        assert core.ipc_call(app, {"cmd": "status"}) == {"ok": True}
+    finally:
+        server.stop()
+
 def test_relative_xdg_paths_ignored(tmp_path):
     app = core.AppPaths.from_env({"HOME": str(tmp_path), "XDG_RUNTIME_DIR": "relative"})
     assert app.runtime_fallback is True
@@ -274,6 +506,15 @@ def test_daemon_lock_refuses_symlink_without_touching_target(tmp_path):
     assert app.lock_file.is_symlink()
 
 
+def test_daemon_lock_refuses_fifo_without_blocking(tmp_path):
+    app = paths(tmp_path)
+    core.ensure_runtime(app)
+    os.mkfifo(app.lock_file)
+
+    with pytest.raises(core.CoreError, match="non-regular lock"):
+        core.DaemonLock.acquire(app.lock_file)
+
+
 def test_ipc_server_refuses_symlink_socket_and_releases_lock(tmp_path):
     app = paths(tmp_path)
     core.ensure_runtime(app)
@@ -293,6 +534,33 @@ def test_ipc_server_refuses_symlink_socket_and_releases_lock(tmp_path):
     lock.close()
 
 
+def test_ipc_server_refuses_to_delete_non_socket_path(tmp_path):
+    app = paths(tmp_path)
+    core.ensure_runtime(app)
+    app.socket_file.write_text("preserve", encoding="utf-8")
+    server = core.IpcServer(app, lambda _request: {"ok": True}, core.setup_logging(app))
+
+    with pytest.raises(core.CoreError, match="non-socket IPC path"):
+        server.start()
+
+    assert app.socket_file.read_text(encoding="utf-8") == "preserve"
+    lock = core.DaemonLock.acquire(app.lock_file)
+    assert lock is not None
+    lock.close()
+
+
+def test_ipc_shutdown_does_not_unlink_replacement_file(tmp_path):
+    app = paths(tmp_path)
+    server = core.IpcServer(app, lambda _request: {"ok": True}, core.setup_logging(app))
+    server.start()
+
+    app.socket_file.unlink()
+    app.socket_file.write_text("replacement must survive", encoding="utf-8")
+    server.stop()
+
+    assert app.socket_file.read_text(encoding="utf-8") == "replacement must survive"
+
+
 def test_ipc_rejects_different_peer_uid_and_remains_available(tmp_path, monkeypatch):
     app = paths(tmp_path)
     server = core.IpcServer(app, lambda _request: {"ok": True}, core.setup_logging(app))
@@ -302,6 +570,14 @@ def test_ipc_rejects_different_peer_uid_and_remains_available(tmp_path, monkeypa
             patch.setattr(core, "peer_uid", lambda _connection: -1)
             rejected = core.ipc_call(app, {"cmd": "status"})
         assert rejected == {"ok": False, "message": "Rejected peer uid -1"}
+
+        with monkeypatch.context() as patch:
+            patch.setattr(core, "peer_uid", lambda _connection: None)
+            unverifiable = core.ipc_call(app, {"cmd": "status"})
+        assert unverifiable == {
+            "ok": False,
+            "message": "Peer credential verification is unavailable",
+        }
         assert core.ipc_call(app, {"cmd": "status"}) == {"ok": True}
     finally:
         server.stop()
