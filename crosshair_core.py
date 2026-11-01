@@ -363,6 +363,78 @@ def file_fingerprint(path: Path) -> tuple[int, int, int] | None:
         return None
     return (stat.st_ino, stat.st_size, stat.st_mtime_ns)
 
+def dispatch_and_wait(
+    schedule: Callable[[Callable[[], bool]], Any],
+    callback: Callable[[], Any],
+    *,
+    timeout: float = 1.5,
+) -> tuple[bool, str | None]:
+    """Schedule a UI callback and report whether it actually ran.
+
+    If the callback has not started by the deadline it is cancelled, so a
+    timed-out toggle cannot unexpectedly run later when the event loop wakes.
+    A callback already running is allowed to finish, but is reported as
+    incomplete when it exceeds the deadline.
+    """
+    gate = threading.Lock()
+    completed = threading.Event()
+    state = {"started": False, "cancelled": False, "error": None}
+
+    def run() -> bool:
+        with gate:
+            if state["cancelled"]:
+                return False
+            state["started"] = True
+        try:
+            callback()
+        except Exception as exc:
+            state["error"] = exc
+        finally:
+            completed.set()
+        return False
+
+    try:
+        schedule(run)
+    except Exception as exc:
+        return False, f"could not schedule UI callback: {type(exc).__name__}"
+
+    if not completed.wait(max(0.0, timeout)):
+        with gate:
+            # Re-check under the same gate used to publish "started" so a
+            # callback completing at the timeout boundary is not misreported.
+            if not completed.is_set():
+                if not state["started"]:
+                    state["cancelled"] = True
+                    return False, "GTK main loop did not process the command before timeout"
+                return False, "GTK main loop started the command but did not finish before timeout"
+
+    error = state["error"]
+    if error is not None:
+        return False, f"UI callback failed: {type(error).__name__}"
+    return True, None
+
+
+def monitor_cache_key(
+    width_mm: int,
+    height_mm: int,
+    geometry: tuple[int, int, int, int] | None,
+    fallback_identity: int,
+) -> tuple[str, int, int, int, int, int, int]:
+    """Build a stable, per-monitor key without conflating equal-sized displays.
+
+    Physical dimensions alone are not unique. Logical geometry distinguishes
+    separate displays and remains stable when GDK recreates wrapper objects.
+    """
+    width_mm = max(0, int(width_mm))
+    height_mm = max(0, int(height_mm))
+    if geometry is not None:
+        x, y, width, height = (int(part) for part in geometry)
+        return ("geometry", width_mm, height_mm, x, y, width, height)
+    # Geometry is normally available from GDK. Use wrapper identity only as a
+    # last resort rather than allowing same-sized monitors to share a name.
+    return ("fallback", width_mm, height_mm, int(fallback_identity), 0, 0, 0)
+
+
 def setup_logging(paths: AppPaths, *, verbose: bool = False) -> logging.Logger:
     ensure_directory(paths.state_dir, 0o700)
     if paths.log_file.is_symlink():
@@ -568,7 +640,7 @@ class IpcServer:
             self.lock = None
 
 def ipc_call(
-    paths: AppPaths, request: Mapping[str, Any], *, timeout: float = 0.75
+    paths: AppPaths, request: Mapping[str, Any], *, timeout: float = 2.5
 ) -> JsonObject:
     payload = encode_line(request)
     try:

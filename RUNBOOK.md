@@ -9,10 +9,10 @@ Everything below was actually *run*, not just read — a real GTK3 app
 against a virtual X11 display (Xvfb), with `HOME`/`XDG_*` pointed at a
 throwaway directory so it never touched a real config.
 
-- `crosshair_core.py`: full pytest suite (18 tests) — atomic writes,
-  file permissions, symlink refusal, corrupt-config preservation,
-  single-lock-owner under real multiprocess contention, IPC round-trip,
-  malformed-input resilience, oversized-message rejection.
+- Current pytest suite covers atomic writes, permissions, symlink refusal,
+  corrupt-config preservation, multiprocess single-lock ownership, IPC
+  round-trips, malformed/oversized messages, bounded GTK dispatch,
+  monitor cache identity, CLI lifecycle, installation and uninstall paths.
 - `ruff check .` — zero findings on both files.
 - `--help`, `--doctor` (exit 0 with all deps present).
 - Daemon start/stop, `--status` (live), `--toggle`.
@@ -60,6 +60,18 @@ On the user's Nobara/Plasma Wayland session:
 - Verified the identical `--toggle` command against the live daemon flips
   OFF → ON → OFF. Also tested cold start with no daemon: first `--toggle`
   starts the daemon and flips OFF → ON; the second flips ON → OFF.
+- Added regression coverage for equal-sized monitor cache keys, GDK wrapper
+  recreation, monitor movement and duplicate-monitor ordinal persistence.
+  The actual machine has two 597×336 mm Sceptre panels; their logical
+  geometries remain distinct in the cache.
+- Verified the new GTK IPC dispatch on the real Wayland compositor using an
+  isolated profile: status, toggle in both directions, show, hide, config
+  patch, restart handoff to a new PID, and clean quit. The test profile was
+  removed afterwards.
+- IPC commands that mutate or read GTK state now wait for a bounded
+  completion acknowledgement. A callback that has not started before timeout
+  is cancelled; one already running but unfinished is reported as incomplete.
+  Restart prepares the pipe handoff up front and has a watchdog fallback.
 - Corrected the generated app-menu entry and the existing
   `~/Desktop/crosshair.desktop` shortcut to launch the interactive settings
   path (no `--daemon --no-ui`). Kept login autostart headless. All three

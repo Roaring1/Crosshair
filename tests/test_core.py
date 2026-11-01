@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import multiprocessing as mp
 import socket
+import threading
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,101 @@ def paths(tmp_path: Path) -> core.AppPaths:
 @pytest.mark.parametrize("value", ["NaN", float("nan"), "inf", float("inf"), None, {}])
 def test_non_finite_float_uses_default(value):
     assert core.as_float(value, 0.95, 0.05, 1.0) == 0.95
+
+
+def test_monitor_cache_key_distinguishes_equal_sized_monitors():
+    first = core.monitor_cache_key(597, 336, (0, 0, 2560, 1440), 100)
+    second = core.monitor_cache_key(597, 336, (2560, 0, 2560, 1440), 200)
+    assert first != second
+
+
+def test_monitor_cache_key_is_stable_across_wrapper_recreation():
+    first = core.monitor_cache_key(597, 336, (0, 0, 2560, 1440), 100)
+    recreated = core.monitor_cache_key(597, 336, (0, 0, 2560, 1440), 999)
+    assert first == recreated
+
+
+def test_monitor_cache_key_changes_when_monitor_layout_changes():
+    before = core.monitor_cache_key(597, 336, (0, 0, 2560, 1440), 100)
+    moved = core.monitor_cache_key(597, 336, (2560, 0, 2560, 1440), 100)
+    assert before != moved
+
+
+def test_monitor_cache_key_fallback_does_not_conflate_equal_sizes():
+    first = core.monitor_cache_key(597, 336, None, 100)
+    second = core.monitor_cache_key(597, 336, None, 200)
+    assert first != second
+
+
+def test_dispatch_and_wait_acknowledges_completed_callback():
+    calls = []
+    success, error = core.dispatch_and_wait(
+        lambda callback: callback(),
+        lambda: calls.append("applied"),
+    )
+    assert success is True
+    assert error is None
+    assert calls == ["applied"]
+
+
+def test_dispatch_and_wait_cancels_callback_that_never_started():
+    queued = []
+    calls = []
+    success, error = core.dispatch_and_wait(
+        lambda callback: queued.append(callback),
+        lambda: calls.append("late"),
+        timeout=0,
+    )
+    assert success is False
+    assert "did not process" in error
+    assert len(queued) == 1
+    queued[0]()
+    assert calls == []
+
+
+def test_dispatch_and_wait_reports_callback_exception():
+    def fail():
+        raise ValueError("callback failed")
+
+    success, error = core.dispatch_and_wait(lambda callback: callback(), fail)
+    assert success is False
+    assert error == "UI callback failed: ValueError"
+
+
+def test_dispatch_and_wait_reports_callback_still_running():
+    release = threading.Event()
+    started = threading.Event()
+    workers = []
+
+    def schedule(callback):
+        worker = threading.Thread(target=callback, daemon=True)
+        workers.append(worker)
+        worker.start()
+        assert started.wait(1)
+
+    def slow_callback():
+        started.set()
+        release.wait(1)
+
+    success, error = core.dispatch_and_wait(
+        schedule,
+        slow_callback,
+        timeout=0.01,
+    )
+    assert success is False
+    assert error == "GTK main loop started the command but did not finish before timeout"
+    release.set()
+    workers[0].join(1)
+
+
+def test_dispatch_and_wait_reports_scheduler_failure():
+    def fail_schedule(_callback):
+        raise RuntimeError("no scheduler")
+
+    success, error = core.dispatch_and_wait(fail_schedule, lambda: None)
+    assert success is False
+    assert error == "could not schedule UI callback: RuntimeError"
+
 
 def test_bad_nested_types_do_not_crash():
     cfg = core.sanitize_config({

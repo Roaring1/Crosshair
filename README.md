@@ -64,8 +64,10 @@ python3 crosshair.py --doctor
 ```
 
 `--doctor` exits non-zero if a *mandatory* dependency is missing
-(GTK3/Gdk/pycairo always; GTK Layer Shell only when the session is
-Wayland). Tray backends are reported but never mandatory.
+(GTK3/Gdk/pycairo always; GTK Layer Shell when the actual GDK backend is
+Wayland). It checks the live GDK display first and uses session/environment
+hints only when no display can be queried. Tray backends are reported but
+never mandatory.
 
 ---
 
@@ -79,7 +81,7 @@ python3 crosshair.py --show
 python3 crosshair.py --hide
 python3 crosshair.py --set '{"color": "#00ff88", "size": 8}'
 python3 crosshair.py --reload   # reload config.json from disk
-python3 crosshair.py --restart  # save, then hand off to a fresh daemon
+python3 crosshair.py --restart  # wait for a fresh daemon to become IPC-ready
 python3 crosshair.py --quit     # idempotent -- safe to call when not running
 ```
 
@@ -135,6 +137,7 @@ legacy unit automatically.
 | Installed script | `${XDG_DATA_HOME:-~/.local/share}/crosshair/crosshair.py` |
 | Launcher | `~/.local/bin/crosshair` |
 | App-menu entry | `${XDG_DATA_HOME:-~/.local/share}/applications/crosshair.desktop` |
+| Desktop shortcut | `$(xdg-user-dir DESKTOP)/crosshair.desktop` |
 | Autostart entry | `${XDG_CONFIG_HOME:-~/.config}/autostart/crosshair.desktop` |
 
 If `$XDG_RUNTIME_DIR` isn't set or valid, a private cache-backed
@@ -158,15 +161,23 @@ login this shouldn't happen.
 
 ## Development
 
+Use a virtual environment so test/lint tools do not modify the system Python:
+
 ```bash
-pip install --break-system-packages pytest pytest-cov ruff
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip pytest ruff
 ruff check .
-pytest -q
+python -m compileall -q crosshair.py crosshair_core.py tests
+python -m pytest -q
 ```
 
+GitHub Actions runs the same lint/compile/test checks on Python 3.10–3.14.
+
 `crosshair_core.py` is a GTK-free module (paths, atomic config I/O,
-the single-instance lock, and the IPC protocol) with its own test
-suite in `tests/test_core.py`. `crosshair.py` is the GTK application
-that imports it. See `RUNBOOK.md` for the full machine-level release
+the single-instance lock, IPC protocol, and bounded GTK-dispatch helper).
+Its regression suite is in `tests/test_core.py`; CLI/install/startup
+regressions are in `tests/test_cli.py`. `crosshair.py` is the GTK
+application that imports it. See `RUNBOOK.md` for the full machine-level release
 gate, including what's already been verified in a sandboxed headless
 X11 environment versus what still needs a real Wayland/KDE session.

@@ -16,11 +16,44 @@
   self-terminates this process if the main loop never confirms shutdown.
   This never signals another process by PID or name, preserving the
   C-01/C-02 decoy-process safety. Normal quit remains unaffected (<1s).
-- **Known limitation:** `--toggle`, `--show`, `--hide`, `--config`,
-  `--reload`, `--set`, and `--restart` still acknowledge once their
-  callbacks are queued, not once the GTK main loop has applied them. If the
-  loop is wedged, these requests can be accepted but remain unapplied; this
-  needs a synchronous acknowledgement/health-check follow-up.
+- **Fixed:** status reads and GUI-mutating IPC commands now execute on
+  the GTK thread and wait for a bounded completion acknowledgement. Commands
+  that have not started before the deadline are cancelled instead of being
+  left queued to execute unexpectedly after the UI recovers. A callback that
+  has started but cannot finish in time is reported as incomplete.
+- **Fixed:** restart prepares the pipe-EOF replacement handoff before asking
+  GTK to save/quit. A watchdog releases the handoff if the GTK main loop is
+  wedged, so a restart no longer silently stalls behind an unprocessed idle
+  callback.
+- **Fixed:** `--restart` now reports daemon rejection and cold-start failures
+  with a nonzero exit status instead of always returning success.
+- **Fixed:** same-sized monitors no longer share a cached display name.
+  Monitor cache identity includes logical geometry while remaining stable
+  across GDK wrapper recreation.
+- **Fixed:** the settings dropdown now persists `monitor_name_ordinal`, so
+  choosing the second display of a duplicate model survives save/restart.
+- **Fixed:** monitor-added/removed signals and the 400ms polling fallback now
+  coalesce the same topology change into one overlay rebuild. Active-monitor
+  state is initialized from the first build, avoiding an unnecessary rebuild
+  shortly after startup; stale monitor-name cache entries are pruned.
+- **Fixed:** large diagonal `X` and `X-dot` crosshairs now allocate enough
+  window space for their radial endpoints. The settings preview scales large
+  designs to fit its preview area without changing the actual overlay size.
+- **Fixed:** uninstall now removes the generated Desktop shortcut. Purging
+  configuration is recursive, refuses a symlinked config root, and never
+  follows symlinks inside the config tree.
+- **Fixed:** installer source symlink detection now checks the original path
+  before resolving it. Relative `xdg-user-dir DESKTOP` output is rejected in
+  favor of the home Desktop fallback; dangling legacy systemd unit symlinks
+  are cleaned up.
+- **Fixed:** `--doctor` determines the actual GDK display backend before
+  consulting environment hints, so GTK Layer Shell is mandatory on native
+  Wayland even when `XDG_SESSION_TYPE` is unset. `--status` and default
+  settings activation now report an unresponsive daemon accurately.
+- **Fixed:** CLI output piped to an early-closing consumer no longer emits an
+  uncaught `BrokenPipeError` traceback.
+- **Added:** GitHub Actions checks on Python 3.10–3.14, running Ruff,
+  byte-compilation and the full headless regression suite.
 
 ## v3.2.0 — Nobara/KDE hardening pass
 

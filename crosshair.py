@@ -22,17 +22,16 @@
 #   in dropdown, fix tray toggle not syncing checkbox, fix Gtk.Arrow
 #   deprecation, fix scale label layout, math.tau, ASCII section separators
 #
-# 19/08/2026 patch: `--quit` no longer silently no-ops if the GTK
-#   main loop is wedged. IPC commands are queued with GLib.idle_add and
-#   normally acknowledge before the GTK callback executes. The "quit"
-#   handler therefore starts a watchdog thread that gives the main loop
-#   ~3s to flip should_quit, then self-terminates this process if it does
-#   not. Other UI/control commands (toggle/show/hide/config/reload/set/
-#   restart) still acknowledge when queued, not when applied; a wedged
-#   main loop can leave those requests unapplied. That is a known
-#   limitation, not covered by the quit watchdog. The watchdog never
-#   signals any *other* process by PID or name -- it only exits itself,
-#   preserving the C-01/C-02 decoy-process safety.
+# 19/08/2026 patch: a wedged GTK main loop must not make shutdown
+#   commands report success while the daemon remains alive. Quit and
+#   restart now have bounded watchdogs that self-terminate this process
+#   if GTK cannot process the shutdown callback. Restart prepares its
+#   pipe-EOF handoff before queuing the UI save, so a wedged loop still
+#   releases the replacement daemon. Other UI/control IPC commands use
+#   bounded dispatch-and-wait acknowledgement; commands not started by
+#   the deadline are cancelled rather than applied unexpectedly later.
+#   The watchdog never signals another process by PID or name, preserving
+#   the C-01/C-02 decoy-process safety.
 
 import argparse
 import contextlib
@@ -92,6 +91,64 @@ def _sanitize_inplace(cfg: dict) -> dict:
     cfg.update(clean)
     return cfg
 
+
+def _monitor_selection_values(mode, index, name, ordinal) -> dict:
+    """Collect every persisted field for the monitor dropdown selection."""
+    return {
+        "monitor_mode": str(mode or "all"),
+        "monitor_index": int(index or 0),
+        "monitor_name": str(name or ""),
+        "monitor_name_ordinal": int(ordinal or 0),
+    }
+
+
+def _backend_from_type_name(type_name: str, fallback: str = "") -> str:
+    lowered = str(type_name or "").lower()
+    for key in ("wayland", "x11", "broadway", "win32", "quartz"):
+        if key in lowered:
+            return key
+    return str(fallback or "").strip().lower() or "unknown"
+
+
+def _canvas_size_px(config: dict) -> int:
+    """Return a square overlay canvas large enough for every enabled shape."""
+    size = int(config["size"])
+    thick = int(config["thickness"])
+    gap = int(config["gap"])
+    outline = config["outline"]
+    outline_thick = int(outline["thickness"]) if outline.get("enabled") else 0
+    shadow = config["shadow"]
+    shadow_pad = 0
+    if shadow.get("enabled"):
+        shadow_pad = max(
+            abs(int(shadow.get("offset_x", 0))),
+            abs(int(shadow.get("offset_y", 0))),
+        ) + 2
+
+    shape = config["shape"]
+    if shape == "dot":
+        extent = size + outline_thick + shadow_pad
+    elif shape in ("ring", "circle", "dot_ring"):
+        extent = size + thick + outline_thick + shadow_pad
+    elif shape in ("x", "x_dot"):
+        # X endpoints extend in both axes simultaneously. A radial bound is
+        # sqrt(2) times the per-axis endpoint, otherwise large diagonal tips
+        # are clipped by the square GTK window.
+        extent = math.ceil(math.sqrt(2.0) * (gap + size)) + thick + outline_thick + shadow_pad
+    else:
+        extent = gap + size + thick + outline_thick + shadow_pad
+    return max(16, math.ceil(extent * 2 + 8))
+
+
+def _preview_scale(config: dict, width: float, height: float, padding: float = 8.0) -> float:
+    """Scale large settings previews to fit without changing overlay geometry."""
+    if width <= 0 or height <= 0:
+        return 1.0
+    extent = max(1.0, (_canvas_size_px(config) - 8) / 2)
+    available = max(1.0, min(width, height) / 2 - max(0.0, padding))
+    return min(1.0, available / extent)
+
+
 # --- installer / autostart (XDG-only, atomic, symlink-safe) -------------
 
 def _desktop_entry_exec(bin_path: Path, *, daemon: bool = False) -> str:
@@ -126,9 +183,9 @@ def _desktop_dir() -> Path:
     if exe:
         try:
             result = subprocess.run([exe, "DESKTOP"], capture_output=True, text=True, timeout=3)
-            candidate = result.stdout.strip()
-            if result.returncode == 0 and candidate:
-                return Path(candidate)
+            candidate = Path(result.stdout.strip()) if result.stdout.strip() else None
+            if result.returncode == 0 and candidate is not None and candidate.is_absolute():
+                return candidate
         except (OSError, subprocess.TimeoutExpired):
             pass
     return Path.home() / "Desktop"
@@ -137,7 +194,7 @@ def _remove_legacy_systemd_unit() -> list[str]:
     """Remove the v3.1 systemd user service, if present (C-03 migration)."""
     removed = []
     unit = Path.home() / ".config" / "systemd" / "user" / f"{APP_ID}.service"
-    if unit.exists():
+    if unit.exists() or unit.is_symlink():
         try:
             subprocess.run(["systemctl", "--user", "disable", "--now", f"{APP_ID}.service"],
                            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -174,9 +231,15 @@ def _migrate_legacy_config(paths: core.AppPaths, log: logging.Logger) -> None:
         log.warning("Legacy config migration failed: %s", exc)
 
 def install_self(paths: core.AppPaths) -> tuple[Path, Path]:
-    src = Path(__file__).resolve()
-    if src.is_symlink():
-        raise core.CoreError(f"Refusing to install from symlink source: {src}")
+    source = Path(__file__).absolute()
+    if source.is_symlink():
+        raise core.CoreError(f"Refusing to install from symlink source: {source}")
+    try:
+        src = source.resolve(strict=True)
+    except OSError as exc:
+        raise core.CoreError(f"Cannot resolve source script {source}: {exc}") from exc
+    if not src.is_file():
+        raise core.CoreError(f"Source script is not a regular file: {src}")
     core.atomic_write_bytes(paths.installed_source, src.read_bytes(), mode=0o644)
     launcher = f'#!/usr/bin/env bash\nexec python3 "{paths.installed_source}" "$@"\n'
     core.atomic_write_text(paths.bin_file, launcher, mode=0o755)
@@ -220,13 +283,17 @@ def install_autostart(paths: core.AppPaths, log: logging.Logger | None = None) -
         log.info("Removed legacy systemd autostart unit(s): %s", removed_legacy)
     return bin_path, paths.autostart_entry
 
+def desktop_shortcut_path(desktop_dir: Path | None = None) -> Path:
+    return (desktop_dir or _desktop_dir()) / f"{APP_ID}.desktop"
+
+
 def install_desktop_shortcut(paths: core.AppPaths) -> Path:
     _, bin_path = install_self(paths)
     desktop_dir = _desktop_dir()
     if desktop_dir.is_symlink():
         raise core.CoreError(f"Refusing symlink desktop directory: {desktop_dir}")
     desktop_dir.mkdir(parents=True, exist_ok=True)
-    shortcut = desktop_dir / f"{APP_ID}.desktop"
+    shortcut = desktop_shortcut_path(desktop_dir)
     content = (
         "[Desktop Entry]\n"
         "Version=1.0\n"
@@ -246,7 +313,11 @@ def install_desktop_shortcut(paths: core.AppPaths) -> Path:
 def uninstall_app(paths: core.AppPaths) -> list[str]:
     removed = []
     targets = (
-        paths.autostart_entry, paths.application_entry, paths.bin_file, paths.installed_source,
+        paths.autostart_entry,
+        paths.application_entry,
+        desktop_shortcut_path(),
+        paths.bin_file,
+        paths.installed_source,
     )
     for p in targets:
         try:
@@ -265,19 +336,24 @@ def uninstall_app(paths: core.AppPaths) -> list[str]:
     return removed
 
 def purge_config(paths: core.AppPaths) -> list[str]:
-    removed = []
+    target = paths.config_dir
+    if target.is_symlink():
+        print(f"Refusing to purge symlink config directory: {target}", file=sys.stderr)
+        return []
+    if not target.exists():
+        return []
+
     try:
-        if paths.config_dir.exists():
-            for p in sorted(paths.config_dir.glob("*")):
-                if p.is_file() or p.is_symlink():
-                    p.unlink()
-                    removed.append(str(p))
-            if not any(paths.config_dir.iterdir()):
-                paths.config_dir.rmdir()
-                removed.append(str(paths.config_dir))
+        if target.is_dir():
+            # rmtree unlinks symlinks encountered inside the tree; it does
+            # not follow them into user data outside the Crosshair config.
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+        return [str(target)]
     except OSError as exc:
         print(f"Could not fully purge config: {exc}", file=sys.stderr)
-    return removed
+        return []
 
 def start_daemon_background(paths: core.AppPaths) -> bool:
     try:
@@ -289,6 +365,59 @@ def start_daemon_background(paths: core.AppPaths) -> bool:
         return True
     except OSError:
         return False
+
+
+def start_daemon_and_wait(paths: core.AppPaths, *, timeout: float = 4.0) -> bool:
+    """Start a headless daemon and wait until its IPC dispatcher is ready."""
+    if not start_daemon_background(paths):
+        return False
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() < deadline:
+        try:
+            response = core.ipc_call(paths, {"cmd": "status"}, timeout=1.8)
+        except core.IpcUnavailable:
+            time.sleep(0.05)
+            continue
+        if response.get("ok"):
+            return True
+        message = str(response.get("message") or "")
+        if (message != "daemon is still starting up" and
+                message != "GTK main loop did not process the command before timeout"):
+            return False
+        time.sleep(0.05)
+    return False
+
+
+def request_restart(
+    paths: core.AppPaths, *, timeout: float = 8.0
+) -> tuple[bool, str | None]:
+    """Restart a live daemon and wait for a different PID to answer IPC."""
+    try:
+        response = core.ipc_call(paths, {"cmd": "restart"})
+    except core.IpcUnavailable:
+        if start_daemon_and_wait(paths):
+            return True, None
+        return False, "Could not start or contact the Crosshair daemon."
+
+    if not response.get("ok", False):
+        return False, str(response.get("message") or "restart request was rejected")
+    old_pid = response.get("pid")
+    if type(old_pid) is not int:
+        return False, "Restart was accepted but the daemon did not report its PID."
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() < deadline:
+        try:
+            status = core.ipc_call(paths, {"cmd": "status"}, timeout=1.8)
+        except core.IpcUnavailable:
+            time.sleep(0.05)
+            continue
+        if status.get("ok") and status.get("pid") != old_pid:
+            return True, None
+        time.sleep(0.05)
+    return False, "Restart was accepted but the replacement daemon did not become ready in time."
+
 
 # --- doctor ---------------------------------------------------------------
 
@@ -309,7 +438,7 @@ def doctor(paths: core.AppPaths) -> int:
         ("GTK3",          "Gtk",           "3.0", True),
         ("Gdk",           "Gdk",           "3.0", True),
         ("pycairo",       None,            None,  True),
-        ("GtkLayerShell", "GtkLayerShell", "0.1", session_hint == "wayland"),
+        ("GtkLayerShell", "GtkLayerShell", "0.1", False),
     ]
     try:
         import gi
@@ -317,6 +446,32 @@ def doctor(paths: core.AppPaths) -> int:
         lines.append(f"  [MISS] PyGObject (MANDATORY): {exc}")
         mandatory_ok = False
         gi = None
+
+    backend = "unknown"
+    if gi is not None:
+        try:
+            gi.require_version("Gdk", "3.0")
+            from gi.repository import Gdk, GObject
+            display = Gdk.Display.get_default()
+            if display is not None:
+                try:
+                    type_name = GObject.type_name(display)
+                except Exception:
+                    type_name = type(display).__name__
+                backend = _backend_from_type_name(type_name, session_hint)
+        except Exception:
+            pass
+    if backend == "unknown":
+        fallback = session_hint or os.environ.get("GDK_BACKEND", "")
+        if not fallback:
+            fallback = (
+                "wayland" if os.environ.get("WAYLAND_DISPLAY")
+                else "x11" if os.environ.get("DISPLAY")
+                else ""
+            )
+        backend = _backend_from_type_name("", fallback)
+    lines.append(f"GDK backend: {backend}")
+    checks[-1] = ("GtkLayerShell", "GtkLayerShell", "0.1", backend == "wayland")
 
     for label, ns, ver, mandatory in checks:
         try:
@@ -350,10 +505,16 @@ def doctor(paths: core.AppPaths) -> int:
                       "(this never blocks the overlay)")
 
     try:
-        response = core.ipc_call(paths, {"cmd": "status"}, timeout=0.5)
-        lines.append(f"Daemon:   running (pid {response.get('pid', '?')}, "
-                      f"backend={response.get('backend', '?')}, "
-                      f"layershell={response.get('layershell', '?')})")
+        response = core.ipc_call(paths, {"cmd": "status"}, timeout=2.0)
+        if response.get("ok"):
+            lines.append(f"Daemon:   running (pid {response.get('pid', '?')}, "
+                          f"backend={response.get('backend', '?')}, "
+                          f"layershell={response.get('layershell', '?')})")
+        else:
+            lines.append(
+                f"Daemon:   unresponsive ({response.get('message', 'status failed')})"
+            )
+            mandatory_ok = False
     except core.IpcUnavailable:
         lines.append("Daemon:   not running")
 
@@ -410,18 +571,15 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
 
     def _detect_backend(disp):
         # The GObject type name is intrinsic to the C library and is reliable
-        # even when the optional GdkWayland/GdkX11 GI namespaces aren't
-        # installed -- unlike $XDG_SESSION_TYPE, which can disagree with the
-        # actual GDK backend under XWayland.
+        # even when optional GdkWayland/GdkX11 GI namespaces aren't installed.
         try:
             type_name = GObject.type_name(disp)
         except Exception:
             type_name = type(disp).__name__
-        lowered = type_name.lower()
-        for key in ("wayland", "x11", "broadway", "win32", "quartz"):
-            if key in lowered:
-                return key
-        return os.environ.get("XDG_SESSION_TYPE", "").strip().lower() or "unknown"
+        return _backend_from_type_name(
+            type_name,
+            os.environ.get("XDG_SESSION_TYPE", ""),
+        )
 
     backend = _detect_backend(display)
     is_wayland = (backend == "wayland")
@@ -701,25 +859,7 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
             return False
 
         def _canvas_size_px(self):
-            c = cfg
-            size = int(c["size"])
-            thick = int(c["thickness"])
-            gap = int(c["gap"])
-            o = c["outline"]
-            outline_thick = int(o["thickness"]) if o.get("enabled") else 0
-            sh = c["shadow"]
-            shadow_pad = 0
-            if sh.get("enabled"):
-                shadow_pad = max(abs(int(sh.get("offset_x", 0))),
-                                 abs(int(sh.get("offset_y", 0)))) + 2
-            shape = c["shape"]
-            if shape == "dot":
-                ext = size + outline_thick + shadow_pad
-            elif shape in ("ring", "circle", "dot_ring"):
-                ext = size + thick + outline_thick + shadow_pad
-            else:
-                ext = (gap + size) + thick + outline_thick + shadow_pad
-            return max(16, int(ext * 2 + 8))
+            return _canvas_size_px(cfg)
 
         def _recenter(self, w, h):
             try:
@@ -782,23 +922,22 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
     _mon_name_cache = {}
 
     def _mon_cache_key(mon):
-        # Stable hardware identity (physical size in mm) instead of the
-        # GObject wrapper's id() -- id() changes on every hotplug/reconnect
-        # even for the same physical screen, which meant a fresh (and on
-        # this box, apparently multi-second/EDID-reading) manufacturer/model
-        # lookup on every single reconnect -- e.g. every time a Moonlight/
-        # Sunshine virtual display toggled during a stream, blocking the GTK
-        # main loop each time. Physical size in mm comes from the same
-        # wl_output geometry event GDK already has in hand, so reading it
-        # here doesn't trigger a fresh blocking driver round-trip.
+        # Keep the key stable across GDK wrapper recreation, but unique for
+        # different monitors that happen to have identical physical sizes.
+        # Geometry is available from the compositor's cached output state;
+        # unlike manufacturer/model reads it does not perform a fresh EDID
+        # query. A layout change intentionally produces a new key once.
         try:
             w_mm = int(mon.get_width_mm() or 0)
             h_mm = int(mon.get_height_mm() or 0)
         except Exception:
             w_mm = h_mm = 0
-        if w_mm or h_mm:
-            return ("phys", w_mm, h_mm)
-        return ("id", id(mon))
+        try:
+            g = mon.get_geometry()
+            geometry = (int(g.x), int(g.y), int(g.width), int(g.height))
+        except Exception:
+            geometry = None
+        return core.monitor_cache_key(w_mm, h_mm, geometry, id(mon))
 
     def monitor_pretty_name(mon):
         # Cache by stable hardware identity -- EDID reads (manufacturer/model)
@@ -939,6 +1078,7 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
         return mons  # all
 
     windows = []
+    _active_monitor_ref = {"id": None}
 
     def rebuild_windows():
         nonlocal windows
@@ -949,6 +1089,8 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
         for mon in get_monitors():
             windows.append(OverlayWindow(mon, is_wayland=is_wayland,
                                          use_layershell=use_layershell))
+        if str(cfg.get("monitor_mode", "all")).strip().lower() == "active":
+            _active_monitor_ref["id"] = id(windows[0].monitor) if windows else None
 
     rebuild_windows()
 
@@ -1382,8 +1524,8 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
                 buttons=Gtk.ButtonsType.YES_NO, text="Uninstall Crosshair?",
             )
             dlg.format_secondary_text(
-                "This removes the installed script, launcher, app-menu entry, and "
-                "autostart entry. Your configuration file is kept.\n"
+                "This removes the installed script, launcher, app-menu entry, "
+                "Desktop shortcut, and autostart entry. Your configuration file is kept.\n"
                 "The currently running overlay keeps running until you quit it."
             )
             resp = dlg.run()
@@ -1468,9 +1610,10 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
             """
             self._read_ui_to_cfg()
             _save_cfg()
-            _restart_guard["fd"] = core.schedule_restart(
-                Path(__file__).resolve(), ["--daemon", "--no-ui"], paths.log_file
-            )
+            if _restart_guard["fd"] is None:
+                _restart_guard["fd"] = core.schedule_restart(
+                    Path(__file__).resolve(), ["--daemon", "--no-ui"], paths.log_file
+                )
             request_quit()
 
         def _refresh_monitor_dropdown(self):
@@ -1577,9 +1720,12 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
             cfg["enabled"] = bool(self.chk_enabled.get_active())
             cfg["auto_save"] = bool(self.chk_auto_save.get_active())
             cfg["shape"] = self.cmb_shape.get_active_text() or "dot"
-            cfg["monitor_mode"] = str(self._mon_choice_mode or "all")
-            cfg["monitor_index"] = int(self._mon_choice_index or 0)
-            cfg["monitor_name"] = str(self._mon_choice_name or "")
+            cfg.update(_monitor_selection_values(
+                self._mon_choice_mode,
+                self._mon_choice_index,
+                self._mon_choice_name,
+                self._mon_choice_name_ordinal,
+            ))
             cfg["opacity"] = float(self.scale_opacity.get_value())
             cfg["size"] = int(self.scale_size.get_value())
             cfg["thickness"] = int(self.scale_thick.get_value())
@@ -1639,7 +1785,12 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
             cr.rectangle(0, 0, w, h)
             cr.fill()
             if cfg.get("enabled", True):
-                _draw_crosshair(cr, w * 0.5, h * 0.5, cfg)
+                scale = _preview_scale(cfg, w, h)
+                cr.save()
+                cr.translate(w * 0.5, h * 0.5)
+                cr.scale(scale, scale)
+                _draw_crosshair(cr, 0.0, 0.0, cfg)
+                cr.restore()
             return False
 
     settings_window = SettingsWindow()
@@ -1875,6 +2026,23 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
 
     _quit_callbacks.append(_do_quit)
 
+    def _start_shutdown_watchdog(action):
+        # This runs on an IPC worker, never on the GTK thread. If the GTK
+        # loop cannot process the queued shutdown, exit only this process;
+        # the OS releases its lock and any restart handoff pipe descriptors.
+        def _watch():
+            for _ in range(60):  # ~3s grace period
+                if should_quit["value"]:
+                    return
+                time.sleep(0.05)
+            log.warning(
+                "GTK main loop did not process %s within 3s; self-terminating.",
+                action,
+            )
+            os._exit(0)
+
+        threading.Thread(target=_watch, name=f"crosshair-{action}-watchdog", daemon=True).start()
+
     def handle_ipc(req):
         cmd = str(req.get("cmd", "")).lower()
         payload = req.get("payload", None)
@@ -1882,21 +2050,46 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
         def _gl(fn, *args):
             GLib.idle_add(fn, *args, priority=GLib.PRIORITY_DEFAULT)
 
+        def _run_gtk(fn):
+            def _logged_callback():
+                try:
+                    fn()
+                except Exception:
+                    log.exception("GTK callback failed while handling IPC command %s", cmd)
+                    raise
+
+            return core.dispatch_and_wait(
+                lambda callback: GLib.idle_add(
+                    callback, priority=GLib.PRIORITY_DEFAULT
+                ),
+                _logged_callback,
+                timeout=1.5,
+            )
+
+        def _gtk_error(error):
+            return {"ok": False, "message": error or "GTK command was not applied"}
+
         if cmd == "status":
-            return {
-                "ok": True,
-                "version": APP_VERSION,
-                "pid": os.getpid(),
-                "enabled": bool(cfg.get("enabled", True)),
-                "shape": cfg.get("shape", "dot"),
-                "color": cfg.get("color", "#a000ff"),
-                "monitor_mode": cfg.get("monitor_mode", "all"),
-                "backend": backend,
-                "layershell": use_layershell,
-                "monitors": len(get_all_monitors()),
-            }
+            result = {}
+
+            def _status():
+                result.update({
+                    "version": APP_VERSION,
+                    "pid": os.getpid(),
+                    "enabled": bool(cfg.get("enabled", True)),
+                    "shape": cfg.get("shape", "dot"),
+                    "color": cfg.get("color", "#a000ff"),
+                    "monitor_mode": cfg.get("monitor_mode", "all"),
+                    "backend": backend,
+                    "layershell": use_layershell,
+                    "monitors": len(get_all_monitors()),
+                })
+
+            success, error = _run_gtk(_status)
+            return {"ok": True, **result} if success else _gtk_error(error)
+
         if cmd == "toggle":
-            def _t():
+            def _toggle():
                 cfg["enabled"] = not bool(cfg.get("enabled", True))
                 apply_config()
                 if cfg.get("auto_save", True):
@@ -1905,79 +2098,87 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
                     settings_window._sync_ui_from_cfg()
                 else:
                     settings_window._update_statusbar()
-            _gl(_t)
-            return {"ok": True}
+
+            success, error = _run_gtk(_toggle)
+            return {"ok": True} if success else _gtk_error(error)
+
         if cmd == "show":
-            def _s():
+            def _show():
                 cfg["enabled"] = True
                 apply_config()
                 if cfg.get("auto_save", True):
                     _save_cfg()
-            _gl(_s)
-            return {"ok": True}
+
+            success, error = _run_gtk(_show)
+            return {"ok": True} if success else _gtk_error(error)
+
         if cmd == "hide":
-            def _h():
+            def _hide():
                 cfg["enabled"] = False
                 apply_config()
                 if cfg.get("auto_save", True):
                     _save_cfg()
-            _gl(_h)
-            return {"ok": True}
+
+            success, error = _run_gtk(_hide)
+            return {"ok": True} if success else _gtk_error(error)
+
         if cmd == "config":
-            def _c():
+            def _config():
                 settings_window.show_all()
                 settings_window.present()
-            _gl(_c)
-            return {"ok": True}
+
+            success, error = _run_gtk(_config)
+            return {"ok": True} if success else _gtk_error(error)
+
         if cmd == "quit":
+            _start_shutdown_watchdog("quit")
             _gl(request_quit)
-            # Safety net: request_quit only runs once GLib.idle_add
-            # dispatches it on the GTK main loop. If that loop is ever
-            # wedged -- the same class of stall fixed in the 17/08/2026
-            # patch, just hitting a different code path -- the queued
-            # quit silently never fires, and this IPC call still reports
-            # {"ok": True} even though the daemon keeps running forever.
-            # This thread (the IPC server thread, not the GTK thread)
-            # waits a few seconds for should_quit to actually flip, and
-            # self-terminates if it doesn't. It only ever exits *this*
-            # process from inside itself -- no PID/name lookup of any
-            # other process, so it doesn't reintroduce the C-01/C-02
-            # decoy-process risk that was deliberately removed.
-            def _quit_watchdog():
-                for _ in range(60):  # ~3s grace period
-                    if should_quit["value"]:
-                        return
-                    time.sleep(0.05)
-                log.warning("GTK main loop did not process quit within "
-                            "3s (wedged?); self-terminating directly.")
-                os._exit(0)
-            threading.Thread(target=_quit_watchdog, daemon=True).start()
             return {"ok": True}
+
         if cmd == "reload":
-            _gl(_reload_cfg_and_sync)
-            return {"ok": True}
+            success, error = _run_gtk(_reload_cfg_and_sync)
+            return {"ok": True} if success else _gtk_error(error)
+
         if cmd == "restart":
+            # Start the handoff helper before asking GTK to run the UI save
+            # callback. If the event loop is wedged, the watchdog still exits
+            # this daemon, closing the pipe so the replacement can launch
+            # using the last atomically saved config.
+            try:
+                if _restart_guard["fd"] is None:
+                    _restart_guard["fd"] = core.schedule_restart(
+                        Path(__file__).resolve(), ["--daemon", "--no-ui"], paths.log_file
+                    )
+            except Exception as exc:
+                log.exception("Could not schedule Crosshair restart handoff")
+                return {"ok": False, "message": f"could not schedule restart: {type(exc).__name__}"}
+            _start_shutdown_watchdog("restart")
             _gl(settings_window._restart)
-            return {"ok": True}
+            return {"ok": True, "pid": os.getpid(), "restarting": True}
+
         if cmd == "set":
             try:
-                patched = core.apply_patch(cfg, payload)
+                core.validate_patch(payload)
             except core.ConfigError as exc:
                 return {"ok": False, "message": str(exc)}
+
             def _set():
                 was_auto_save = bool(cfg.get("auto_save", True))
+                patched = core.apply_patch(cfg, payload)
                 cfg.clear()
                 cfg.update(patched)
                 apply_config(rebuild=True)
                 now_auto_save = bool(cfg.get("auto_save", True))
                 _save_if_needed(was_auto_save, now_auto_save)
-            _gl(_set)
-            return {"ok": True}
+
+            success, error = _run_gtk(_set)
+            return {"ok": True} if success else _gtk_error(error)
+
         return {"ok": False, "message": f"unknown command: {cmd}"}
 
-    # server was already started (lock + socket acquired) earlier, before any
-    # window/tray construction -- now that handle_ipc exists, wire it in.
-    _ipc_handler_ref["fn"] = handle_ipc
+    # server was already started (lock + socket acquired) before any
+    # window/tray construction. Keep its dispatcher in "starting up" state
+    # until all monitor polling and signal sources are installed.
 
     # config file watcher -- fingerprint-based so our own saves never
     # self-trigger a reload (H-02 / item 9)
@@ -2001,29 +2202,54 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
         mons = get_all_monitors()
         try:
             primary = display.get_primary_monitor()
+            primary_geometry = _monitor_geo_key(primary) if primary is not None else None
         except Exception:
-            primary = None
+            primary_geometry = None
         parts = []
+        live_cache_keys = set()
         for m in mons:
             try:
                 g = m.get_geometry()
+                live_cache_keys.add(_mon_cache_key(m))
                 parts.append((
                     monitor_pretty_name(m), g.x, g.y, g.width, g.height,
-                    round(m.get_scale_factor() or 1), m is primary,
+                    round(m.get_scale_factor() or 1),
+                    primary_geometry is not None and _monitor_geo_key(m) == primary_geometry,
                 ))
             except Exception:
                 parts.append((id(m),))
+        # Drop cache entries for unplugged or moved monitors. Without pruning,
+        # repeated virtual-display hotplug/layout changes could grow this
+        # otherwise tiny cache forever.
+        for stale_key in set(_mon_name_cache) - live_cache_keys:
+            _mon_name_cache.pop(stale_key, None)
         return tuple(parts)
 
     _last_mon_fp = [_monitor_fingerprint()]
-    _last_active_mon = [None]
+    _monitor_change_pending = [False]
 
     def on_mon_change(*_):
-        apply_config(rebuild=True)
-        try:
-            settings_window.refresh_monitor_options()
-        except Exception:
-            log.exception("Failed to refresh monitor options")
+        # monitor-added/removed signals and the 400ms fingerprint poll can
+        # observe the same topology update. Coalesce them into one idle
+        # callback, and publish the new fingerprint only after rebuilding.
+        if _monitor_change_pending[0]:
+            return
+        _monitor_change_pending[0] = True
+
+        def _apply_monitor_change():
+            _monitor_change_pending[0] = False
+            fingerprint = _monitor_fingerprint()
+            if fingerprint == _last_mon_fp[0]:
+                return False
+            _last_mon_fp[0] = fingerprint
+            apply_config(rebuild=True)
+            try:
+                settings_window.refresh_monitor_options()
+            except Exception:
+                log.exception("Failed to refresh monitor options")
+            return False
+
+        GLib.idle_add(_apply_monitor_change, priority=GLib.PRIORITY_DEFAULT_IDLE)
 
     try:
         display.connect("monitor-added", on_mon_change)
@@ -2034,14 +2260,12 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
     def _poll_monitors():
         fp = _monitor_fingerprint()
         if fp != _last_mon_fp[0]:
-            _last_mon_fp[0] = fp
             on_mon_change()
             return True
         if str(cfg.get("monitor_mode", "all")).strip().lower() == "active":
             mons = get_monitors()
             current = id(mons[0]) if mons else None
-            if current != _last_active_mon[0]:
-                _last_active_mon[0] = current
+            if current != _active_monitor_ref["id"]:
                 apply_config(rebuild=True)
         return True
 
@@ -2060,6 +2284,11 @@ def run_daemon(paths: core.AppPaths, open_config: bool = False, verbose: bool = 
 
     if open_config:
         GLib.idle_add(lambda: (settings_window.show_all(), settings_window.present(), False)[-1])
+
+    # Publish IPC readiness only after every GTK source/window is prepared,
+    # immediately before entering the main loop. Clients see the retryable
+    # "daemon is still starting up" response until this point.
+    _ipc_handler_ref["fn"] = handle_ipc
 
     try:
         Gtk.main()
@@ -2110,6 +2339,12 @@ def main():
     if args.status:
         try:
             response = core.ipc_call(paths, {"cmd": "status"})
+            if not response.get("ok", False):
+                print(
+                    f"daemon:  unresponsive ({response.get('message', 'status failed')})",
+                    file=sys.stderr,
+                )
+                return 2
             print(f"daemon:  running (pid {response.get('pid', '?')})")
             print(f"config:  {paths.config_file}")
             print(f"enabled: {response.get('enabled')}")
@@ -2181,10 +2416,10 @@ def main():
         return run_daemon(paths, open_config=(not args.no_ui), verbose=args.verbose)
 
     if args.restart:
-        try:
-            core.ipc_call(paths, {"cmd": "restart"})
-        except core.IpcUnavailable:
-            start_daemon_background(paths)
+        success, error = request_restart(paths)
+        if not success:
+            print(f"Restart failed: {error}", file=sys.stderr)
+            return 2
         return 0
 
     explicit = (args.toggle or args.show or args.hide or args.config or
@@ -2243,7 +2478,10 @@ def main():
                 # it like an unavailable socket and retry instead of
                 # surfacing a spurious failure on the very first --toggle.
                 if (not candidate.get("ok") and
-                        candidate.get("message") == "daemon is still starting up"):
+                        candidate.get("message") in {
+                            "daemon is still starting up",
+                            "GTK main loop did not process the command before timeout",
+                        }):
                     continue
                 response = candidate
                 break
@@ -2261,10 +2499,29 @@ def main():
         response = core.ipc_call(paths, {"cmd": "config"})
         if response.get("ok", False):
             return 0
+        print(
+            f"Could not open Crosshair settings: "
+            f"{response.get('message', 'GTK did not apply the request')}",
+            file=sys.stderr,
+        )
+        return 2
     except core.IpcUnavailable:
         pass
     return run_daemon(paths, open_config=True, verbose=args.verbose)
 
 
+def _safe_main() -> int:
+    try:
+        return main()
+    except BrokenPipeError:
+        # A consumer may close stdout before all status/help lines are written.
+        # Replace the stream too, so interpreter shutdown does not emit a
+        # second BrokenPipeError while flushing stdout.
+        with contextlib.suppress(OSError, ValueError):
+            sys.stdout.close()
+        sys.stdout = os.fdopen(os.open(os.devnull, os.O_WRONLY), "w", encoding="utf-8")
+        return 0
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_safe_main())
