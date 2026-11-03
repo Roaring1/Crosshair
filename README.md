@@ -1,3 +1,5 @@
+> **Development-branch notice:** This branch contains the native Rust rewrite. The established Python application remains on `main`; the Rust package is versioned `4.0.0` in Cargo but is still an unreleased draft. Do not treat this branch as a published release or as a reason to remove an existing Python installation. See [RUST-PORT-STATUS.md](RUST-PORT-STATUS.md) for the implementation comparison and release gates.
+
 # Crosshair
 
 GTK3 crosshair overlay for Linux — Wayland (via GTK Layer Shell on
