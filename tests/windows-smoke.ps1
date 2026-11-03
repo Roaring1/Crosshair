@@ -335,27 +335,32 @@ try {
     $settingsProcess = $null
     $deadline = [DateTime]::UtcNow.AddSeconds(12)
     while ([DateTime]::UtcNow -lt $deadline -and $null -eq $settingsProcess) {
-        $settingsProcess = Get-Process -Name "crosshair-settings" -ErrorAction SilentlyContinue |
-            Where-Object { $_.Id -notin $before } |
-            Select-Object -First 1
-        if ($null -eq $settingsProcess) { Start-Sleep -Milliseconds 100 }
-        else {
-            $settingsProcess.Refresh()
-            if ($settingsProcess.MainWindowHandle -eq 0) {
-                $settingsProcess = $null
-                Start-Sleep -Milliseconds 100
+        $candidates = @(Get-Process -Name "crosshair-settings" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Id -notin $before })
+        foreach ($candidate in $candidates) {
+            $candidate.Refresh()
+            $visibleSettingsHwnds = @(
+                [CrosshairSmokeNative]::FindVisibleWindowsForProcess($candidate.Id, "Crosshair Settings")
+            )
+            if ($visibleSettingsHwnds.Count -gt 0) {
+                $settingsProcess = $candidate
+                break
             }
         }
+        if ($null -eq $settingsProcess) { Start-Sleep -Milliseconds 100 }
     }
     if ($null -eq $settingsProcess) {
-        throw "The installed CLI did not open a visible sibling Settings window."
+        throw "The installed CLI did not create a visible window titled 'Crosshair Settings'."
     }
 
     Write-SmokeLog "[6/9] close Settings and verify overlay lifetime is independent"
-    $settingsHwnds = @([CrosshairSmokeNative]::FindVisibleWindowsForProcess($settingsProcess.Id, "Crosshair Settings"))
-    if ($settingsHwnds.Count -eq 0 -and $settingsProcess.MainWindowHandle -ne 0) {
-        $settingsHwnds = @([IntPtr]$settingsProcess.MainWindowHandle)
-    }
+    # Do not use Process.MainWindowHandle as a fallback. Winit creates its own
+    # thread event-target HWND, and IME windows can also belong to this PID.
+    # Posting WM_CLOSE to either internal HWND destroys the event loop plumbing
+    # instead of closing the actual Settings UI.
+    $settingsHwnds = @(
+        [CrosshairSmokeNative]::FindVisibleWindowsForProcess($settingsProcess.Id, "Crosshair Settings")
+    )
     Write-SmokeLog ("Settings top-level HWNDs for pid " + $settingsProcess.Id + ": " + ($settingsHwnds -join ", "))
     foreach ($settingsHwnd in $settingsHwnds) {
         Write-SmokeLog ("Settings HWND " + $settingsHwnd + " " + [CrosshairSmokeNative]::DescribeWindow([IntPtr]$settingsHwnd))
@@ -380,10 +385,9 @@ try {
         }
         if (-not $closeCallbackSeen -and $closeWatch.ElapsedMilliseconds -ge ($lastCloseRetry + 1500)) {
             $settingsProcess.Refresh()
-            $currentHwnds = @([CrosshairSmokeNative]::FindVisibleWindowsForProcess($settingsProcess.Id, "Crosshair Settings"))
-            if ($currentHwnds.Count -eq 0 -and $settingsProcess.MainWindowHandle -ne 0) {
-                $currentHwnds = @([IntPtr]$settingsProcess.MainWindowHandle)
-            }
+            $currentHwnds = @(
+                [CrosshairSmokeNative]::FindVisibleWindowsForProcess($settingsProcess.Id, "Crosshair Settings")
+            )
             foreach ($currentHwnd in $currentHwnds) {
                 $currentKey = $currentHwnd.ToInt64().ToString()
                 $posted = [CrosshairSmokeNative]::PostMessage([IntPtr]$currentHwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
