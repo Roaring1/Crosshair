@@ -91,12 +91,12 @@ capture "02-appearance-top"
 
 echo "[3/6] Open the main color palette"
 # Main color swatch: left pane, Color row.
-click_at 122 300
+click_at 122 265
 capture "03-color-picker"
 
 echo "[4/6] Select a preset and verify that it persists"
 # Row 2, column 4 of the palette is #0ea5e9.
-click_at 204 380
+click_at 204 353
 sleep 0.8
 capture "04-color-selected"
 grep -qi '#0ea5e9' "$XDG_CONFIG_HOME/crosshair/config.json"
