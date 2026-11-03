@@ -241,3 +241,25 @@ The workflow now runs the existing Python gates plus:
 - A Windows-latest compile check for the shared core, Settings UI and cfg-gated Windows code.
 
 The Windows job is intentionally not described as Windows feature verification. CI results must be inspected after the branch is pushed.
+
+
+## Settings UI visual pass (2026-11-02)
+
+The Rust Settings window now has a wider working canvas and more conservative
+inner padding. Appearance uses a wider scroll pane beside a slightly larger
+preview; the scroll content is inset so controls do not sit directly against
+the viewport edge. The General and Appearance window heights were increased
+to reduce the amount of immediate scrolling without removing the scroll path.
+
+Color fields now open an in-app palette with 24 quick-pick colors, while the
+adjacent HEX field remains available for arbitrary custom colors. This applies
+to the primary crosshair, outline, shadow, second reference dot and preview
+background. Color selection goes through the existing Settings change callback
+and therefore the same config validation, preview and persistence path.
+
+Linux CI captures General, Appearance, the open palette and the lower
+Appearance controls with ImageMagick under Xvfb, then uploads
+`crosshair-rust-settings-ui` for visual review. Those artifacts are diagnostic;
+they do not claim to validate KDE Wayland placement, real multi-monitor
+behavior, or fullscreen-game visibility. The new screenshot path must pass in
+CI before the UI visual gate is considered verified.
