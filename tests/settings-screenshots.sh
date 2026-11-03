@@ -86,7 +86,7 @@ echo "[1/5] Capture General"
 capture "01-general"
 
 echo "[2/5] Open Appearance"
-click_at 145 24
+click_at 315 24
 capture "02-appearance-top"
 
 echo "[3/5] Open the main color palette"
