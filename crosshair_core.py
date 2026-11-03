@@ -1,0 +1,1084 @@
+#!/usr/bin/env python3
+"""Hardened, GTK-free core for Crosshair on Linux/Nobara.
+
+No import-time writes, sockets, display access, migration, or process signals.
+"""
+from __future__ import annotations
+
+import contextlib
+import errno
+import fcntl
+import json
+import logging
+import math
+import os
+import re
+import secrets
+import socket
+import stat
+import struct
+import subprocess
+import sys
+import threading
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from typing import IO, Any
+
+APP_ID = "crosshair"
+APP_NAME = "Crosshair"
+APP_VERSION = "3.2.0-candidate"
+MAX_IPC_BYTES = 64 * 1024
+MAX_CONFIG_BYTES = 1024 * 1024
+MAX_STRING_LENGTH = 256
+SOCKET_PATH_LIMIT = 100
+
+JsonObject = dict[str, Any]
+IpcHandler = Callable[[JsonObject], Mapping[str, Any]]
+
+class CoreError(RuntimeError):
+    pass
+
+class ConfigError(CoreError):
+    pass
+
+class ConfigTooLarge(ConfigError):
+    pass
+
+class AlreadyRunning(CoreError):
+    pass
+
+class ProtocolError(CoreError):
+    pass
+
+class IpcUnavailable(CoreError):
+    pass
+
+@dataclass(frozen=True)
+class AppPaths:
+    home: Path
+    config_dir: Path
+    config_file: Path
+    runtime_dir: Path
+    socket_file: Path
+    lock_file: Path
+    state_dir: Path
+    log_file: Path
+    data_dir: Path
+    installed_source: Path
+    bin_file: Path
+    application_entry: Path
+    autostart_entry: Path
+    runtime_fallback: bool
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> AppPaths:
+        env = os.environ if env is None else env
+        fallback_home = Path.home()
+        candidate_home = Path(env.get("HOME") or fallback_home).expanduser()
+        home = candidate_home if candidate_home.is_absolute() else fallback_home
+
+        def xdg(name: str, fallback: Path) -> Path:
+            raw = env.get(name)
+            candidate = Path(raw).expanduser() if raw else fallback
+            return candidate if candidate.is_absolute() else fallback
+
+        config_home = xdg("XDG_CONFIG_HOME", home / ".config")
+        cache_home = xdg("XDG_CACHE_HOME", home / ".cache")
+        state_home = xdg("XDG_STATE_HOME", home / ".local" / "state")
+        data_home = xdg("XDG_DATA_HOME", home / ".local" / "share")
+        runtime_raw = env.get("XDG_RUNTIME_DIR")
+        runtime_candidate = Path(runtime_raw).expanduser() if runtime_raw else None
+        runtime_valid = bool(runtime_candidate and runtime_candidate.is_absolute())
+        runtime_home = runtime_candidate if runtime_valid else cache_home / "runtime"
+        if runtime_home is None:
+            raise CoreError("Could not resolve a runtime directory")
+
+        config_dir = config_home / APP_ID
+        runtime_dir = runtime_home / APP_ID
+        state_dir = state_home / APP_ID
+        data_dir = data_home / APP_ID
+        return cls(
+            home=home,
+            config_dir=config_dir,
+            config_file=config_dir / "config.json",
+            runtime_dir=runtime_dir,
+            socket_file=runtime_dir / "ipc.sock",
+            lock_file=runtime_dir / "daemon.lock",
+            state_dir=state_dir,
+            log_file=state_dir / "crosshair.log",
+            data_dir=data_dir,
+            installed_source=data_dir / "crosshair.py",
+            bin_file=home / ".local" / "bin" / APP_ID,
+            application_entry=data_home / "applications" / f"{APP_ID}.desktop",
+            autostart_entry=config_home / "autostart" / f"{APP_ID}.desktop",
+            runtime_fallback=not runtime_valid,
+        )
+
+def ensure_directory(path: Path, mode: int = 0o700) -> Path:
+    path = Path(path)
+    if path.is_symlink():
+        raise CoreError(f"Refusing symlink directory: {path}")
+    path.mkdir(parents=True, exist_ok=True, mode=mode)
+
+    # Open the directory itself without following a last-component symlink,
+    # then chmod the verified inode through its file descriptor. A path swap
+    # between a separate is_symlink() check and chmod() must not redirect the
+    # permission change to an attacker-selected target.
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise CoreError(f"Could not safely open directory {path}: {exc}") from exc
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISDIR(opened.st_mode):
+            raise CoreError(f"Not a directory: {path}")
+        os.fchmod(fd, mode)
+        try:
+            current = path.lstat()
+        except OSError as exc:
+            raise CoreError(f"Directory changed during validation: {path}") from exc
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise CoreError(f"Directory changed during validation: {path}")
+    finally:
+        os.close(fd)
+    return path
+
+def ensure_runtime(paths: AppPaths) -> None:
+    ensure_directory(paths.runtime_dir, 0o700)
+    length = len(os.fsencode(str(paths.socket_file)))
+    if length >= SOCKET_PATH_LIMIT:
+        raise CoreError(f"AF_UNIX path too long ({length} bytes): {paths.socket_file}")
+
+def atomic_write_bytes(path: Path, data: bytes, *, mode: int = 0o600) -> None:
+    path = Path(path)
+    if not path.name or path.name in {".", ".."}:
+        raise CoreError(f"Invalid atomic-write destination: {path}")
+    if path.parent.is_symlink():
+        raise CoreError(f"Refusing symlink parent: {path.parent}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Pin the parent directory. All operations below are relative to this
+    # descriptor, so a rename/symlink swap of the parent pathname cannot
+    # redirect the temporary file, replacement, or cleanup elsewhere.
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    dir_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        parent_fd = os.open(path.parent, dir_flags)
+    except OSError as exc:
+        raise CoreError(f"Could not safely open atomic-write parent {path.parent}: {exc}") from exc
+    parent_info = os.fstat(parent_fd)
+    if not stat.S_ISDIR(parent_info.st_mode):
+        os.close(parent_fd)
+        raise CoreError(f"Atomic-write parent is not a directory: {path.parent}")
+
+    temp_name: str | None = None
+    file_fd = -1
+    try:
+        try:
+            existing = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if stat.S_ISLNK(existing.st_mode):
+                raise CoreError(f"Refusing symlink destination: {path}")
+            if not stat.S_ISREG(existing.st_mode):
+                raise CoreError(f"Refusing non-regular destination: {path}")
+
+        file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        file_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        for _attempt in range(100):
+            candidate = f".{path.name}.{secrets.token_hex(12)}.tmp"
+            try:
+                file_fd = os.open(
+                    candidate,
+                    file_flags,
+                    mode,
+                    dir_fd=parent_fd,
+                )
+                temp_name = candidate
+                break
+            except FileExistsError:
+                continue
+            except OSError as exc:
+                try:
+                    current_parent = path.parent.lstat()
+                except OSError:
+                    current_parent = None
+                if (
+                    current_parent is None
+                    or not stat.S_ISDIR(current_parent.st_mode)
+                    or (current_parent.st_dev, current_parent.st_ino)
+                    != (parent_info.st_dev, parent_info.st_ino)
+                ):
+                    raise CoreError(
+                        f"Atomic-write parent changed before temporary-file creation: {path.parent}"
+                    ) from exc
+                raise CoreError(
+                    f"Could not safely create temporary file for {path}: {exc}"
+                ) from exc
+        if file_fd < 0 or temp_name is None:
+            raise CoreError(f"Could not allocate a unique temporary file for {path}")
+
+        os.fchmod(file_fd, mode)
+        with os.fdopen(file_fd, "wb") as handle:
+            file_fd = -1
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        # Recheck the entry without following it. If an attacker races this
+        # check, renameat-style replacement still replaces the link itself,
+        # never its target.
+        try:
+            existing = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if stat.S_ISLNK(existing.st_mode):
+                raise CoreError(f"Destination became a symlink: {path}")
+            if not stat.S_ISREG(existing.st_mode):
+                raise CoreError(f"Destination became non-regular: {path}")
+
+        try:
+            current_parent = path.parent.lstat()
+        except OSError as exc:
+            raise CoreError(f"Atomic-write parent changed before commit: {path.parent}") from exc
+        if (
+            not stat.S_ISDIR(current_parent.st_mode)
+            or (current_parent.st_dev, current_parent.st_ino)
+            != (parent_info.st_dev, parent_info.st_ino)
+        ):
+            raise CoreError(f"Atomic-write parent changed before commit: {path.parent}")
+
+        os.replace(
+            temp_name,
+            path.name,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+        )
+        temp_name = None
+        os.fsync(parent_fd)
+        try:
+            current_parent = path.parent.lstat()
+        except OSError as exc:
+            current_parent = None
+            parent_error = exc
+        else:
+            parent_error = None
+        if (
+            current_parent is None
+            or not stat.S_ISDIR(current_parent.st_mode)
+            or (current_parent.st_dev, current_parent.st_ino)
+            != (parent_info.st_dev, parent_info.st_ino)
+        ):
+            # The write stayed confined to the pinned directory descriptor,
+            # but the user-visible parent path changed during commit. Remove
+            # the just-written entry from the pinned directory and report it.
+            with contextlib.suppress(OSError):
+                os.unlink(path.name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+            raise CoreError(
+                f"Atomic-write parent changed during commit: {path.parent}"
+            ) from parent_error
+    finally:
+        if file_fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(file_fd)
+        if temp_name is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(temp_name, dir_fd=parent_fd)
+        os.close(parent_fd)
+
+def atomic_write_text(path: Path, text: str, *, mode: int = 0o600) -> None:
+    atomic_write_bytes(path, text.encode("utf-8"), mode=mode)
+
+VALID_SHAPES = {
+    "dot", "cross", "x", "plus", "ring", "circle",
+    "cross_dot", "x_dot", "dot_ring",
+}
+VALID_MONITOR_MODES = {"all", "primary", "active", "index", "name"}
+HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
+ALLOWED_TOP = {
+    "enabled", "shape", "opacity", "size", "thickness", "gap", "color",
+    "outline", "shadow", "monitor_mode", "monitor_index", "monitor_name",
+    "monitor_name_ordinal", "preview_bg", "auto_save",
+}
+ALLOWED_OUTLINE = {"enabled", "color", "opacity", "thickness"}
+ALLOWED_SHADOW = {"enabled", "color", "opacity", "offset_x", "offset_y"}
+
+def default_config() -> JsonObject:
+    return {
+        "enabled": True,
+        "shape": "dot",
+        "opacity": 0.95,
+        "size": 5,
+        "thickness": 2,
+        "gap": 3,
+        "color": "#a000ff",
+        "outline": {
+            "enabled": True,
+            "color": "#000000",
+            "opacity": 0.80,
+            "thickness": 1,
+        },
+        "shadow": {
+            "enabled": False,
+            "color": "#000000",
+            "opacity": 0.35,
+            "offset_x": 1,
+            "offset_y": 1,
+        },
+        "monitor_mode": "all",
+        "monitor_index": 0,
+        "monitor_name": "",
+        "monitor_name_ordinal": 0,
+        "preview_bg": "#222222",
+        "auto_save": True,
+    }
+
+def as_bool(value: Any, default: bool) -> bool:
+    if type(value) is bool:
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+def as_int(value: Any, default: int, lo: int, hi: int) -> int:
+    if isinstance(value, bool):
+        value = default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        parsed = default
+    return max(lo, min(hi, parsed))
+
+def as_float(value: Any, default: float, lo: float, hi: float) -> float:
+    if isinstance(value, bool):
+        value = default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        parsed = default
+    if not math.isfinite(parsed):
+        parsed = default
+    return max(lo, min(hi, parsed))
+
+def as_color(value: Any, default: str) -> str:
+    candidate = str(value).strip()
+    if not candidate.startswith("#"):
+        candidate = "#" + candidate
+    return candidate.lower() if HEX_COLOR.fullmatch(candidate) else default
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+def sanitize_config(raw: Any, *, strict_unknown: bool = False) -> JsonObject:
+    if not isinstance(raw, Mapping):
+        if strict_unknown:
+            raise ConfigError("Configuration must be a JSON object")
+        raw = {}
+    unknown = set(raw) - ALLOWED_TOP
+    if strict_unknown and unknown:
+        raise ConfigError(f"Unknown config keys: {sorted(unknown)}")
+
+    outline = _mapping(raw.get("outline"))
+    shadow = _mapping(raw.get("shadow"))
+    if strict_unknown:
+        bad_outline = set(outline) - ALLOWED_OUTLINE
+        bad_shadow = set(shadow) - ALLOWED_SHADOW
+        if bad_outline:
+            raise ConfigError(f"Unknown outline keys: {sorted(bad_outline)}")
+        if bad_shadow:
+            raise ConfigError(f"Unknown shadow keys: {sorted(bad_shadow)}")
+
+    shape = str(raw.get("shape", "dot")).strip().lower()
+    if shape not in VALID_SHAPES:
+        shape = "dot"
+    if shape == "circle":
+        shape = "ring"
+    monitor_mode = str(raw.get("monitor_mode", "all")).strip().lower()
+    if monitor_mode not in VALID_MONITOR_MODES:
+        monitor_mode = "all"
+    monitor_name_raw = raw.get("monitor_name", "")
+    monitor_name = monitor_name_raw if isinstance(monitor_name_raw, str) else ""
+
+    return {
+        "enabled": as_bool(raw.get("enabled"), True),
+        "shape": shape,
+        "opacity": as_float(raw.get("opacity"), 0.95, 0.05, 1.0),
+        "size": as_int(raw.get("size"), 5, 1, 200),
+        "thickness": as_int(raw.get("thickness"), 2, 1, 100),
+        "gap": as_int(raw.get("gap"), 3, 0, 200),
+        "color": as_color(raw.get("color"), "#a000ff"),
+        "outline": {
+            "enabled": as_bool(outline.get("enabled"), True),
+            "color": as_color(outline.get("color"), "#000000"),
+            "opacity": as_float(outline.get("opacity"), 0.80, 0.0, 1.0),
+            "thickness": as_int(outline.get("thickness"), 1, 0, 100),
+        },
+        "shadow": {
+            "enabled": as_bool(shadow.get("enabled"), False),
+            "color": as_color(shadow.get("color"), "#000000"),
+            "opacity": as_float(shadow.get("opacity"), 0.35, 0.0, 1.0),
+            "offset_x": as_int(shadow.get("offset_x"), 1, -200, 200),
+            "offset_y": as_int(shadow.get("offset_y"), 1, -200, 200),
+        },
+        "monitor_mode": monitor_mode,
+        "monitor_index": as_int(raw.get("monitor_index"), 0, 0, 255),
+        "monitor_name": monitor_name[:MAX_STRING_LENGTH],
+        "monitor_name_ordinal": as_int(raw.get("monitor_name_ordinal"), 0, 0, 255),
+        "preview_bg": as_color(raw.get("preview_bg"), "#222222"),
+        "auto_save": as_bool(raw.get("auto_save"), True),
+    }
+
+@dataclass(frozen=True)
+class ConfigLoadResult:
+    config: JsonObject
+    recovered: bool = False
+    corrupt_copy: Path | None = None
+    error: str | None = None
+
+def _read_config_bytes_nofollow(path: Path) -> bytes | None:
+    """Read a regular config file without following a symlink at open time."""
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    # Opening a FIFO must not block this startup path; fstat rejects it below.
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ConfigError(f"Refusing symlink config: {path}") from exc
+        raise
+
+    owned_fd = fd
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ConfigError(f"Refusing non-regular config file: {path}")
+        if info.st_size > MAX_CONFIG_BYTES:
+            raise ConfigTooLarge(
+                f"Config file exceeds the {MAX_CONFIG_BYTES}-byte safety limit: {path}"
+            )
+        with os.fdopen(fd, "rb") as handle:
+            owned_fd = -1
+            raw_bytes = handle.read(MAX_CONFIG_BYTES + 1)
+            if len(raw_bytes) > MAX_CONFIG_BYTES:
+                raise ConfigTooLarge(
+                    f"Config file grew beyond the {MAX_CONFIG_BYTES}-byte safety limit: {path}"
+                )
+            return raw_bytes
+    finally:
+        if owned_fd >= 0:
+            os.close(owned_fd)
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> JsonObject:
+    """Build a JSON object while rejecting duplicate keys at every depth."""
+    result: JsonObject = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    """Reject Python JSON decoder extensions that are not valid JSON."""
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
+def load_config(path: Path, log: logging.Logger | None = None) -> ConfigLoadResult:
+    path = Path(path)
+    try:
+        raw_bytes = _read_config_bytes_nofollow(path)
+    except ConfigTooLarge as exc:
+        # Keep the original oversized file untouched and avoid making another
+        # potentially huge backup. The app can continue with in-memory defaults.
+        if log:
+            log.error("%s; original file left untouched", exc)
+        return ConfigLoadResult(
+            default_config(),
+            True,
+            None,
+            f"{exc}; original file left untouched",
+        )
+    except ConfigError:
+        raise
+    except OSError as exc:
+        raise ConfigError(f"Could not read config safely: {exc}") from exc
+
+    if raw_bytes is None:
+        return ConfigLoadResult(default_config())
+
+    try:
+        parsed = json.loads(
+            raw_bytes.decode("utf-8"),
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+        )
+        if not isinstance(parsed, Mapping):
+            raise ConfigError("Configuration must be a JSON object")
+        unknown = set(parsed) - ALLOWED_TOP
+        if unknown and log:
+            log.warning("Ignoring unknown config keys: %s", sorted(unknown))
+        return ConfigLoadResult(sanitize_config(parsed))
+    except (UnicodeError, json.JSONDecodeError, ConfigError, ValueError, RecursionError) as exc:
+        stamp = time.strftime("%Y%m%dT%H%M%S", time.localtime())
+        backup = path.with_name(
+            f"{path.name}.corrupt-{stamp}-{os.getpid()}-{time.time_ns()}"
+        )
+        try:
+            # Preserve the exact bytes read from the verified regular file;
+            # never reopen the source path and accidentally follow a swapped symlink.
+            atomic_write_bytes(backup, raw_bytes, mode=0o600)
+        except (OSError, CoreError) as preserve_error:
+            raise ConfigError(
+                f"Invalid config could not be preserved: {preserve_error}"
+            ) from exc
+        message = f"Invalid config preserved at {backup}: {exc}"
+        if log:
+            log.error(message)
+        return ConfigLoadResult(default_config(), True, backup, message)
+
+def save_config(config: Mapping[str, Any], path: Path) -> JsonObject:
+    clean = sanitize_config(config, strict_unknown=True)
+    ensure_directory(Path(path).parent, 0o700)
+    atomic_write_text(path, json.dumps(clean, indent=2, sort_keys=True) + "\n")
+    return clean
+
+def dispatch_and_wait(
+    schedule: Callable[[Callable[[], bool]], Any],
+    callback: Callable[[], Any],
+    *,
+    timeout: float = 1.5,
+) -> tuple[bool, str | None]:
+    """Schedule a UI callback and report whether it actually ran.
+
+    If the callback has not started by the deadline it is cancelled, so a
+    timed-out toggle cannot unexpectedly run later when the event loop wakes.
+    A callback already running is allowed to finish, but is reported as
+    incomplete when it exceeds the deadline.
+    """
+    gate = threading.Lock()
+    completed = threading.Event()
+    state = {"started": False, "cancelled": False, "error": None}
+
+    def run() -> bool:
+        with gate:
+            if state["cancelled"]:
+                return False
+            state["started"] = True
+        try:
+            callback()
+        except Exception as exc:
+            state["error"] = exc
+        finally:
+            completed.set()
+        return False
+
+    try:
+        schedule(run)
+    except Exception as exc:
+        return False, f"could not schedule UI callback: {type(exc).__name__}"
+
+    if not completed.wait(max(0.0, timeout)):
+        with gate:
+            # Re-check under the same gate used to publish "started" so a
+            # callback completing at the timeout boundary is not misreported.
+            if not completed.is_set():
+                if not state["started"]:
+                    state["cancelled"] = True
+                    return False, "GTK main loop did not process the command before timeout"
+                return False, "GTK main loop started the command but did not finish before timeout"
+
+    error = state["error"]
+    if error is not None:
+        return False, f"UI callback failed: {type(error).__name__}"
+    return True, None
+
+
+def monitor_cache_key(
+    width_mm: int,
+    height_mm: int,
+    geometry: tuple[int, int, int, int] | None,
+    fallback_identity: int,
+) -> tuple[str, int, int, int, int, int, int]:
+    """Build a stable, per-monitor key without conflating equal-sized displays.
+
+    Physical dimensions alone are not unique. Logical geometry distinguishes
+    separate displays and remains stable when GDK recreates wrapper objects.
+    """
+    width_mm = max(0, int(width_mm))
+    height_mm = max(0, int(height_mm))
+    if geometry is not None:
+        x, y, width, height = (int(part) for part in geometry)
+        return ("geometry", width_mm, height_mm, x, y, width, height)
+    # Geometry is normally available from GDK. Use wrapper identity only as a
+    # last resort rather than allowing same-sized monitors to share a name.
+    return ("fallback", width_mm, height_mm, int(fallback_identity), 0, 0, 0)
+
+
+class _NoFollowRotatingFileHandler(RotatingFileHandler):
+    """Rotating file logger that never opens a symlinked log destination."""
+
+    def _open(self):
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_NONBLOCK", 0)
+        try:
+            fd = os.open(self.baseFilename, flags, 0o600)
+        except OSError as exc:
+            raise CoreError(f"Could not safely open log file {self.baseFilename}: {exc}") from exc
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise CoreError(f"Refusing non-regular log file: {self.baseFilename}")
+            os.fchmod(fd, 0o600)
+            return os.fdopen(
+                fd,
+                self.mode,
+                encoding=self.encoding,
+                errors=self.errors,
+            )
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise
+
+
+def setup_logging(paths: AppPaths, *, verbose: bool = False) -> logging.Logger:
+    ensure_directory(paths.state_dir, 0o700)
+    if paths.log_file.is_symlink():
+        raise CoreError(f"Refusing symlink log: {paths.log_file}")
+    logger = logging.getLogger(APP_ID)
+    for old_handler in logger.handlers[:]:
+        logger.removeHandler(old_handler)
+        old_handler.close()
+    logger.propagate = False
+    logger.setLevel(logging.DEBUG if verbose else logging.INFO)
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(threadName)s %(name)s: %(message)s"
+    )
+    file_handler = _NoFollowRotatingFileHandler(
+        paths.log_file, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    if verbose:
+        stream = logging.StreamHandler()
+        stream.setFormatter(formatter)
+        logger.addHandler(stream)
+    return logger
+
+@dataclass
+class DaemonLock:
+    path: Path
+    handle: IO[str]
+
+    @classmethod
+    def acquire(cls, path: Path) -> DaemonLock | None:
+        path = Path(path)
+        ensure_directory(path.parent, 0o700)
+        if path.is_symlink():
+            raise CoreError(f"Refusing symlink lock: {path}")
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(path, flags, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise CoreError(f"Refusing non-regular lock file: {path}")
+            handle = os.fdopen(fd, "r+", encoding="utf-8")
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.close()
+            return None
+        except Exception:
+            handle.close()
+            raise
+        os.fchmod(handle.fileno(), 0o600)
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"{os.getpid()}\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+        return cls(path, handle)
+
+    def close(self) -> None:
+        if self.handle.closed:
+            return
+        try:
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self.handle.close()
+
+def encode_line(payload: Mapping[str, Any]) -> bytes:
+    data = (
+        json.dumps(dict(payload), separators=(",", ":"), allow_nan=False) + "\n"
+    ).encode("utf-8")
+    if len(data) > MAX_IPC_BYTES:
+        raise ProtocolError("IPC message is too large")
+    return data
+
+def recv_line(conn: socket.socket) -> bytes:
+    data = bytearray()
+    while True:
+        remaining = MAX_IPC_BYTES + 1 - len(data)
+        if remaining <= 0:
+            raise ProtocolError("IPC message is too large")
+        chunk = conn.recv(min(4096, remaining))
+        if not chunk:
+            raise ProtocolError("Connection closed before newline")
+        data.extend(chunk)
+        if len(data) > MAX_IPC_BYTES:
+            raise ProtocolError("IPC message is too large")
+        newline = data.find(b"\n")
+        if newline >= 0:
+            return bytes(data[:newline])
+
+def decode_object(raw: bytes) -> JsonObject:
+    try:
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
+        raise ProtocolError(f"Invalid JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ProtocolError("IPC message must be an object")
+    return value
+
+def peer_uid(conn: socket.socket) -> int | None:
+    if not hasattr(socket, "SO_PEERCRED"):
+        return None
+    size = struct.calcsize("3i")
+    raw = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, size)
+    _pid, uid, _gid = struct.unpack("3i", raw)
+    return uid
+
+class IpcServer:
+    def __init__(self, paths: AppPaths, handler: IpcHandler, log: logging.Logger):
+        self.paths = paths
+        self.handler = handler
+        self.log = log
+        self.lock: DaemonLock | None = None
+        self.sock: socket.socket | None = None
+        self.socket_identity: tuple[int, int] | None = None
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self.stop_event.clear()
+        ensure_runtime(self.paths)
+        self.lock = DaemonLock.acquire(self.paths.lock_file)
+        if self.lock is None:
+            raise AlreadyRunning("Crosshair daemon is already running")
+        try:
+            try:
+                existing_socket_path = self.paths.socket_file.lstat()
+            except FileNotFoundError:
+                existing_socket_path = None
+            if existing_socket_path is not None:
+                if stat.S_ISLNK(existing_socket_path.st_mode):
+                    raise CoreError(f"Refusing symlink socket: {self.paths.socket_file}")
+                if not stat.S_ISSOCK(existing_socket_path.st_mode):
+                    raise CoreError(
+                        f"Refusing to remove non-socket IPC path: {self.paths.socket_file}"
+                    )
+                self.paths.socket_file.unlink()
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            # Unix socket nodes are created as 0777 & umask. Create with
+            # exact owner-only permissions at bind time so no post-bind
+            # path-based chmod can be redirected by a symlink swap.
+            old_umask = os.umask(0o177)
+            try:
+                self.sock.bind(str(self.paths.socket_file))
+            finally:
+                os.umask(old_umask)
+            socket_info = self.paths.socket_file.lstat()
+            if (
+                not stat.S_ISSOCK(socket_info.st_mode)
+                or socket_info.st_uid != os.getuid()
+                or socket_info.st_mode & 0o077
+            ):
+                raise CoreError(
+                    f"Bound IPC socket has unexpected type, owner, or permissions: "
+                    f"{self.paths.socket_file}"
+                )
+            self.socket_identity = (socket_info.st_dev, socket_info.st_ino)
+            self.sock.listen(16)
+            # A blocking accept sleeps without periodic wakeups. stop() uses
+            # a private local connection to wake the listener immediately.
+            self.thread = threading.Thread(
+                target=self._serve, name="crosshair-ipc", daemon=True
+            )
+            self.thread.start()
+        except Exception:
+            self._cleanup_socket()
+            if self.lock:
+                self.lock.close()
+                self.lock = None
+            raise
+
+    def _serve(self) -> None:
+        while not self.stop_event.is_set():
+            listener = self.sock
+            if listener is None:
+                return
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                if not self.stop_event.is_set():
+                    self.log.exception("IPC accept failed")
+                return
+            # stop() connects once to wake accept(); never parse or dispatch
+            # that shutdown-only connection as an IPC request.
+            if self.stop_event.is_set():
+                conn.close()
+                return
+            with conn:
+                conn.settimeout(1.0)
+                try:
+                    uid = peer_uid(conn)
+                    if uid is None:
+                        raise ProtocolError("Peer credential verification is unavailable")
+                    if uid != os.getuid():
+                        raise ProtocolError(f"Rejected peer uid {uid}")
+                    request = decode_object(recv_line(conn))
+                    if not isinstance(request.get("cmd"), str):
+                        raise ProtocolError("Missing string command")
+                    response = dict(self.handler(request))
+                    response.setdefault("ok", True)
+                except ProtocolError as exc:
+                    response = {"ok": False, "message": str(exc)}
+                except Exception as exc:
+                    self.log.exception("IPC handler failed")
+                    response = {
+                        "ok": False,
+                        "message": f"internal error: {type(exc).__name__}",
+                    }
+                try:
+                    conn.sendall(encode_line(response))
+                except (OSError, ProtocolError):
+                    self.log.exception("IPC response failed")
+
+    def _cleanup_socket(self) -> None:
+        sock, self.sock = self.sock, None
+        expected_identity, self.socket_identity = self.socket_identity, None
+        if sock:
+            with contextlib.suppress(OSError):
+                sock.close()
+        if expected_identity is None:
+            return
+        try:
+            current = self.paths.socket_file.lstat()
+        except OSError:
+            return
+        if (
+            stat.S_ISSOCK(current.st_mode)
+            and (current.st_dev, current.st_ino) == expected_identity
+        ):
+            self.paths.socket_file.unlink(missing_ok=True)
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        # Wake a blocking accept() without a timer or polling loop. The
+        # listener stays available until the worker accepts this connection.
+        if self.sock is not None:
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as wake:
+                    wake.settimeout(0.5)
+                    wake.connect(str(self.paths.socket_file))
+            except OSError:
+                pass
+        if self.thread and self.thread is not threading.current_thread():
+            self.thread.join(timeout=1.5)
+        # Fallback cleanup still closes the listener if the wake connection
+        # could not be delivered or the worker was processing another client.
+        self._cleanup_socket()
+        if self.thread and self.thread is not threading.current_thread():
+            self.thread.join(timeout=1.0)
+        self.thread = None
+        if self.lock:
+            self.lock.close()
+            self.lock = None
+
+def ipc_call(
+    paths: AppPaths, request: Mapping[str, Any], *, timeout: float = 2.5
+) -> JsonObject:
+    payload = encode_line(request)
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(timeout)
+            client.connect(str(paths.socket_file))
+            client.sendall(payload)
+            response = decode_object(recv_line(client))
+    except (TimeoutError, FileNotFoundError, ConnectionRefusedError, OSError) as exc:
+        raise IpcUnavailable(str(exc)) from exc
+    if type(response.get("ok")) is not bool:
+        raise ProtocolError("Response is missing boolean ok")
+    return response
+
+def _number(name: str, value: Any, lo: float, hi: float) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"{name} must be numeric")
+    numeric = float(value)
+    if not math.isfinite(numeric) or not lo <= numeric <= hi:
+        raise ConfigError(f"{name} must be between {lo} and {hi}")
+
+def _integer(name: str, value: Any, lo: int, hi: int) -> None:
+    if type(value) is not int or not lo <= value <= hi:
+        raise ConfigError(f"{name} must be an integer between {lo} and {hi}")
+
+def validate_patch(payload: Any) -> JsonObject:
+    if not isinstance(payload, Mapping):
+        raise ConfigError("Config patch must be an object")
+    unknown = set(payload) - ALLOWED_TOP
+    if unknown:
+        raise ConfigError(f"Unknown patch keys: {sorted(unknown)}")
+    result = dict(payload)
+    float_ranges = {"opacity": (0.05, 1.0)}
+    integer_ranges = {
+        "size": (1, 200),
+        "thickness": (1, 100),
+        "gap": (0, 200),
+        "monitor_index": (0, 255),
+        "monitor_name_ordinal": (0, 255),
+    }
+    for key, value in result.items():
+        if key in {"outline", "shadow"}:
+            if not isinstance(value, Mapping):
+                raise ConfigError(f"{key} must be an object")
+            allowed = ALLOWED_OUTLINE if key == "outline" else ALLOWED_SHADOW
+            bad = set(value) - allowed
+            if bad:
+                raise ConfigError(f"Unknown {key} keys: {sorted(bad)}")
+            for nested_key, nested_value in value.items():
+                full = f"{key}.{nested_key}"
+                if nested_key == "enabled" and type(nested_value) is not bool:
+                    raise ConfigError(f"{full} must be boolean")
+                if nested_key == "color" and not HEX_COLOR.fullmatch(str(nested_value)):
+                    raise ConfigError(f"{full} must be #RRGGBB")
+                if nested_key == "opacity":
+                    _number(full, nested_value, 0.0, 1.0)
+                if nested_key == "thickness":
+                    _integer(full, nested_value, 0, 100)
+                if nested_key in {"offset_x", "offset_y"}:
+                    _integer(full, nested_value, -200, 200)
+            continue
+        if key in {"enabled", "auto_save"} and type(value) is not bool:
+            raise ConfigError(f"{key} must be boolean")
+        if key in float_ranges:
+            _number(key, value, *float_ranges[key])
+        if key in integer_ranges:
+            _integer(key, value, *integer_ranges[key])
+        if key in {"color", "preview_bg"} and not HEX_COLOR.fullmatch(str(value)):
+            raise ConfigError(f"{key} must be #RRGGBB")
+        if key == "shape" and str(value).lower() not in VALID_SHAPES:
+            raise ConfigError(f"Unsupported shape: {value}")
+        if key == "monitor_mode" and str(value).lower() not in VALID_MONITOR_MODES:
+            raise ConfigError(f"Unsupported monitor mode: {value}")
+        if key == "monitor_name" and (
+            not isinstance(value, str) or len(value) > MAX_STRING_LENGTH
+        ):
+            raise ConfigError("monitor_name is invalid or too long")
+    return result
+
+def deep_merge(base: Mapping[str, Any], patch: Mapping[str, Any]) -> JsonObject:
+    out = dict(base)
+    for key, value in patch.items():
+        if isinstance(value, Mapping) and isinstance(out.get(key), Mapping):
+            out[key] = deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+def apply_patch(config: Mapping[str, Any], payload: Any) -> JsonObject:
+    return sanitize_config(
+        deep_merge(config, validate_patch(payload)), strict_unknown=True
+    )
+
+def schedule_restart(script: Path, argv: list[str], log_file: Path) -> int:
+    """Return a guard FD; close it after cleanup to launch the replacement."""
+    log_file = Path(log_file)
+    ensure_directory(log_file.parent, 0o700)
+    if log_file.is_symlink():
+        raise CoreError(f"Refusing symlink restart log: {log_file}")
+    log_flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    log_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    log_flags |= getattr(os, "O_NONBLOCK", 0)
+    try:
+        log_fd = os.open(log_file, log_flags, 0o600)
+    except OSError as exc:
+        raise CoreError(f"Could not safely open restart log {log_file}: {exc}") from exc
+
+    read_fd = -1
+    write_fd = -1
+    try:
+        if not stat.S_ISREG(os.fstat(log_fd).st_mode):
+            raise CoreError(f"Refusing non-regular restart log: {log_file}")
+        os.fchmod(log_fd, 0o600)
+
+        read_fd, write_fd = os.pipe()
+        os.set_inheritable(read_fd, True)
+        helper = (
+            "import os,subprocess,sys\n"
+            "fd=int(sys.argv[1]); script=sys.argv[2]; args=sys.argv[3:]\n"
+            "try:\n"
+            "    while os.read(fd,4096): pass\n"
+            "finally:\n"
+            "    os.close(fd)\n"
+            "subprocess.Popen([sys.executable,script,*args],"
+            "stdin=subprocess.DEVNULL,start_new_session=True,close_fds=True)\n"
+        )
+        command = [
+            sys.executable, "-c", helper, str(read_fd), str(Path(script).resolve()), *argv
+        ]
+        subprocess.Popen(
+            command,
+            pass_fds=(read_fd,),
+            close_fds=True,
+            stdin=subprocess.DEVNULL,
+            stdout=log_fd,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        os.close(read_fd)
+        read_fd = -1
+        return write_fd
+    except BaseException:
+        for fd in (read_fd, write_fd):
+            if fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+        raise
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(log_fd)
+
+def release_restart_guard(write_fd: int | None) -> None:
+    if write_fd is not None:
+        with contextlib.suppress(OSError):
+            os.close(write_fd)
