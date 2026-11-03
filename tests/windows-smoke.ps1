@@ -19,6 +19,11 @@ $Package = Join-Path $Root "package"
 New-Item -ItemType Directory -Force -Path $Package, $env:APPDATA, $env:LOCALAPPDATA | Out-Null
 Copy-Item -LiteralPath $SourceCli, $SourceSettings, $InstallScript, $UninstallScript, $Readme -Destination $Package
 
+# Simulate a prior release with an explicit login-startup preference.
+$RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+New-Item -Path $RunKey -Force | Out-Null
+Set-ItemProperty -LiteralPath $RunKey -Name "Crosshair" -Value ('"' + $SourceCli + '" --daemon --no-ui')
+
 $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\Crosshair"
 $Bin = Join-Path $InstallDir "crosshair.exe"
 $Settings = Join-Path $InstallDir "crosshair-settings.exe"
@@ -80,6 +85,12 @@ try {
     }
     $version = Invoke-Crosshair -Arguments @("--version")
     if ($version -notmatch "Crosshair 4\.0\.0") { throw "Unexpected installed version: $version" }
+    $migratedRun = (Get-ItemProperty -LiteralPath $RunKey -Name "Crosshair").Crosshair
+    if ($migratedRun -notmatch [regex]::Escape($Bin) -or
+        $migratedRun -notmatch "--daemon" -or
+        $migratedRun -notmatch "-WindowStyle Hidden") {
+        throw "Installer did not preserve and modernize the previous login-startup preference."
+    }
     if (-not (Test-Path -LiteralPath $StartMenuShortcut -PathType Leaf)) {
         throw "Installer did not create the Start Menu shortcut."
     }
