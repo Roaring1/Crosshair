@@ -1220,10 +1220,7 @@ pub fn run_tray() -> Result<(), String> {
             .status();
         match show_result {
             Ok(status) if status.success() => {}
-            Ok(status) => trace(
-                &paths,
-                &format!("tray startup: --show returned {}", status),
-            ),
+            Ok(status) => trace(&paths, &format!("tray startup: --show returned {}", status)),
             Err(error) => trace(
                 &paths,
                 &format!("tray startup: could not request --show: {error}"),

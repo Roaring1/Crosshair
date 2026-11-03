@@ -268,10 +268,8 @@ fn read_ui(
     let mut next = current.clone();
     next.enabled = ui.get_enabled();
     next.auto_save = ui.get_auto_save();
-    next.activity_mode = activity_mode_from_label(
-        ui.get_activity_selection().to_string().as_str(),
-    )
-    .into();
+    next.activity_mode =
+        activity_mode_from_label(ui.get_activity_selection().to_string().as_str()).into();
     next.shape = ui.get_shape().to_string();
     next.opacity = ui.get_crosshair_opacity();
     next.size = ui.get_size().clamp(1, 200) as u16;
