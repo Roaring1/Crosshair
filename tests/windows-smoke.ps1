@@ -64,13 +64,17 @@ public static class CrosshairSmokeNative {
                "' visible=" + IsWindowVisible(hWnd).ToString();
     }
 
-    public static IntPtr[] FindTopLevelWindowsForProcess(int processId) {
+    public static IntPtr[] FindVisibleWindowsForProcess(int processId, string expectedTitle) {
         List<IntPtr> handles = new List<IntPtr>();
         EnumWindowsProc callback = delegate(IntPtr hWnd, IntPtr lParam) {
             uint ownerProcessId;
             GetWindowThreadProcessId(hWnd, out ownerProcessId);
-            if (ownerProcessId == (uint)processId) {
-                handles.Add(hWnd);
+            if (ownerProcessId == (uint)processId && IsWindowVisible(hWnd)) {
+                StringBuilder title = new StringBuilder(256);
+                GetWindowText(hWnd, title, title.Capacity);
+                if (String.Equals(title.ToString(), expectedTitle, StringComparison.OrdinalIgnoreCase)) {
+                    handles.Add(hWnd);
+                }
             }
             return true;
         };
@@ -348,7 +352,7 @@ try {
     }
 
     Write-SmokeLog "[6/9] close Settings and verify overlay lifetime is independent"
-    $settingsHwnds = @([CrosshairSmokeNative]::FindTopLevelWindowsForProcess($settingsProcess.Id))
+    $settingsHwnds = @([CrosshairSmokeNative]::FindVisibleWindowsForProcess($settingsProcess.Id, "Crosshair Settings"))
     if ($settingsHwnds.Count -eq 0 -and $settingsProcess.MainWindowHandle -ne 0) {
         $settingsHwnds = @([IntPtr]$settingsProcess.MainWindowHandle)
     }
@@ -376,7 +380,7 @@ try {
         }
         if (-not $closeCallbackSeen -and $closeWatch.ElapsedMilliseconds -ge ($lastCloseRetry + 1500)) {
             $settingsProcess.Refresh()
-            $currentHwnds = @([CrosshairSmokeNative]::FindTopLevelWindowsForProcess($settingsProcess.Id))
+            $currentHwnds = @([CrosshairSmokeNative]::FindVisibleWindowsForProcess($settingsProcess.Id, "Crosshair Settings"))
             if ($currentHwnds.Count -eq 0 -and $settingsProcess.MainWindowHandle -ne 0) {
                 $currentHwnds = @([IntPtr]$settingsProcess.MainWindowHandle)
             }
