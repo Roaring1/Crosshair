@@ -201,7 +201,12 @@ pub fn install_autostart(executable: &Path) -> Result<(), String> {
             executable.display()
         ));
     }
-    let command = format!("\"{}\" --daemon --no-ui", executable.display());
+    // The Run key is launched by Explorer. Start the console-subsystem CLI
+    // through hidden PowerShell so login autostart never flashes a terminal.
+    let executable = executable.to_string_lossy().replace('\'', "''");
+    let command = format!(
+        "powershell.exe -NoProfile -WindowStyle Hidden -Command \\\"Start-Process -FilePath '{executable}' -ArgumentList @('--daemon','--no-ui') -WindowStyle Hidden\\\""
+    );
     let command = wide(&command);
     let subkey = wide(r"Software\Microsoft\Windows\CurrentVersion\Run");
     let value_name = wide("Crosshair");
