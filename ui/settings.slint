@@ -700,7 +700,7 @@ export component SettingsWindow inherits Window {
 
         if root.active-tab == 0: ScrollView {
             width: 100%;
-            vertical-stretch: 1;
+            height: root.height - 71px - (root.profile-panel-visible ? 114px : 0px);
             VerticalLayout {
                 spacing: 8px;
                 padding: 8px;
@@ -788,7 +788,7 @@ export component SettingsWindow inherits Window {
 
         if root.active-tab == 1: HorizontalLayout {
             spacing: 10px;
-            vertical-stretch: 1;
+            height: root.height - 71px - (root.profile-panel-visible ? 114px : 0px);
 
             ScrollView {
                 width: 420px;
