@@ -843,19 +843,38 @@ fn run() -> Result<(), String> {
         );
         close_requested.store(true, Ordering::Release);
         close_timer.stop();
-        // Keep the native surface alive until ComponentHandle::run() regains
-        // control and hides it after the event loop has stopped. Hiding it
-        // inside this close event races Slint's deferred window properties.
-        // Let Slint perform the native hide after this callback. Settings has
-        // only one visible window, so hiding it lets ComponentHandle::run()
-        // return and the code below can drain the worker and flush final state.
-        // Calling ui.hide() from inside this callback would race deferred native
-        // window properties; returning HideWindow delegates that transition to
-        // Slint's platform backend instead.
-        trace_settings(
-            &close_paths,
-            "window close: allowing Slint to hide Settings and end its event loop",
-        );
+
+        // Let Slint finish the native hide after this callback. Queue the loop
+        // quit for the next event-loop turn: on Windows, the Winit backend can
+        // deliver CloseRequested while the native window is still registered,
+        // and quitting before the deferred hide is processed can leave the
+        // Settings process alive with no visible window.
+        let deferred_quit_paths = close_paths.clone();
+        match slint::invoke_from_event_loop(move || {
+            trace_settings(
+                &deferred_quit_paths,
+                "window close: deferred event-loop quit callback entered",
+            );
+            match slint::quit_event_loop() {
+                Ok(()) => trace_settings(
+                    &deferred_quit_paths,
+                    "window close: deferred Slint event-loop quit scheduled",
+                ),
+                Err(error) => trace_settings(
+                    &deferred_quit_paths,
+                    &format!("window close: deferred event-loop quit failed: {error}"),
+                ),
+            }
+        }) {
+            Ok(()) => trace_settings(
+                &close_paths,
+                "window close: deferred event-loop quit queued",
+            ),
+            Err(error) => trace_settings(
+                &close_paths,
+                &format!("window close: could not queue event-loop quit: {error}"),
+            ),
+        }
         slint::CloseRequestResponse::HideWindow
     });
 
