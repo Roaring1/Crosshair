@@ -74,7 +74,7 @@ echo "[3] click Remove autostart"
 # The one-line result feedback expands the window slightly, leaving the
 # optional startup buttons fully in view.
 sleep 0.35
-xdotool mousemove --window "$WINDOW" 414 442 click 1
+xdotool mousemove --window "$WINDOW" 468 517 click 1
 for _ in $(seq 1 80); do
     [[ ! -e "$AUTOSTART" ]] && break
     sleep 0.05
