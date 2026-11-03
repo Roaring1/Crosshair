@@ -96,11 +96,15 @@ Windows-native regression test connects to a server that deliberately never
 replies and verifies that the client returns a timeout within five seconds.
 
 The Windows smoke runs every CLI command through a bounded process wrapper
-that captures stdout/stderr and terminates a timed-out CLI process tree. On
-timeout it does not wait on output streams that may remain open through a
-descendant; it records whether the streams completed. It writes per-command
-stage diagnostics to `RUNNER_TEMP`; the workflow uploads those logs even when
-the integration step fails or reaches its timeout. The Windows daemon also
-records startup, monitor enumeration, overlay creation and IPC
-request/response milestones in `%LOCALAPPDATA%\Crosshair\crosshair.log`;
-the timeout handler includes that application log in the uploaded artifact.
+that captures stdout/stderr and terminates only the timed-out CLI process;
+the final cleanup separately targets the daemon and Settings process from
+the isolated install path. The wrapper never performs a second unbounded
+`Process.WaitForExit()` after its finite wait, because that overload also
+waits for redirected stream readers and can remain open while a detached
+daemon owns an inherited pipe handle. Output tasks are read only when already
+complete. The wrapper writes per-command stage diagnostics to `RUNNER_TEMP`;
+the workflow uploads those logs even when the integration step fails or
+reaches its timeout. The Windows daemon also records startup, monitor
+enumeration, overlay creation and IPC request/response milestones in
+`%LOCALAPPDATA%\Crosshair\crosshair.log`; the wrapper includes that
+application log in the uploaded artifact on a timeout or CLI failure.
