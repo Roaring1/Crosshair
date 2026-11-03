@@ -2,6 +2,19 @@
 
 _Last reviewed: 2026-11-03_
 
+## Update — 2026-11-03 continued: Windows Settings shutdown and resource measurements
+
+- The Windows smoke has consistently completed installer migration, monitor discovery, named-pipe configuration, cold overlay start, status checks and opening the separate Settings process. The remaining failure is specifically process shutdown after the Settings window receives `WM_CLOSE`.
+- Run #168 showed that returning `HideWindow` from the close callback did not reliably complete Settings shutdown on Windows; the deferred `invoke_from_event_loop` callback was queued but not observed before the smoke timeout.
+- Run #171 showed that a one-shot 25 ms Slint timer fired and `quit_event_loop()` returned success, but keeping the native Settings window shown during that quit still left the process alive. The close handler now waits until the WM_CLOSE dispatch has unwound, explicitly calls `ui.hide()` from the one-shot timer to release the visible-window keepalive, then requests event-loop termination. The worker-drain and final-config flush remain after `ui.run()` returns; no helper thread, polling loop, forced process exit, or daemon shutdown was added.
+- Local validation of the new close sequence at commit `adf48d2bf8b6de175740f1e8d3d28bea79403b1d` passed: debug build; Xvfb Settings close with the enabled overlay surviving; X11 ARGB/no-focus/input-region/click-through/cold-start/hide smoke; all 52 Rust tests; optimized build; and `git diff --check`. Commit `b4fa86fdc2572fd5c65696e477f657ec8534ba1e` only corrects the rustfmt layout. Hosted Actions run #174 is the first CI run for that formatted head; Windows behavior is not yet confirmed.
+- Runs #172 and #173 stopped at the formatting gate before compilation. Those were formatting-only failures in the latest close-handler block; the layout has since been corrected. Do not interpret those runs as a compile or runtime failure for the new implementation.
+- A separate on-demand resource sample was taken using the installed Crosshair 4.0.0 CLI under a private Xvfb display and temporary HOME/XDG directories. OFF reported no daemon. The `--show` client returned in 26 ms; the active daemon used one thread, 3,016 KiB RSS and six open file descriptors; its CPU accounting advanced by zero ticks during a five-second idle window (reported 0.00%). `--hide` returned the app to OFF with no daemon process or IPC socket. This is a controlled Xvfb sample, not a KDE Wayland benchmark; PSS and real-session GPU/display behavior were not measured.
+- The real Nobara installation was not replaced during this work. Its saved configuration, desktop launcher, SVG icon and explicitly opted-in login autostart were left untouched. The installed Settings executable remains one validated source build behind; wait for the Windows gate before updating the installed pair.
+
+Open release gates remain: a successful Windows installer/overlay/Settings-close/uninstall smoke and Windows x64 artifact; a real Windows-laptop check; a real KDE Wayland session check; and a decision on whether the known tray parity gap is acceptable for the first Rust release. Keep PR #3 in draft.
+
+
 ## Update — 2026-11-03: NobaraPC Rust deployment
 
 The Rust Linux build is now installed as the active NobaraPC application:
