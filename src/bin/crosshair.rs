@@ -107,6 +107,8 @@ fn launch_settings() -> Result<(), String> {
 }
 
 fn spawn_daemon(paths: &AppPaths) -> Result<(), String> {
+    #[cfg(not(windows))]
+    let _ = paths;
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let mut command = Command::new(executable);
     command.arg("--daemon");
