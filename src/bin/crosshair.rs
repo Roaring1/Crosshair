@@ -57,7 +57,16 @@ fn send_command(
     Ok(response)
 }
 
-#[cfg(not(unix))]
+#[cfg(target_os = "windows")]
+fn send_command(
+    paths: &AppPaths,
+    command: &str,
+    payload: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    crosshair_core::windows::send_command(paths, command, payload)
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
 fn send_command(
     _: &AppPaths,
     _: &str,
@@ -460,12 +469,51 @@ fn uninstall() -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        let _ = std::fs::remove_file(bin_dir.join("crosshair.exe"));
-        let _ = std::fs::remove_file(bin_dir.join("crosshair-settings.exe"));
+        let cleanup_script = bin_dir.join("Uninstall-Crosshair.ps1");
+        if !cleanup_script.is_file() {
+            return Err(format!(
+                "Windows cleanup script is missing: {}. Run Uninstall-Crosshair.ps1 from the original package.",
+                cleanup_script.display()
+            ));
+        }
+        Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-WindowStyle",
+                "Hidden",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(&cleanup_script)
+            .arg("-WaitForProcessId")
+            .arg(std::process::id().to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| {
+                format!("Could not start the deferred Windows uninstaller: {error}")
+            })?;
+        println!(
+            "Windows uninstall started. Close Settings to complete file removal; your configuration will be retained."
+        );
+        return Ok(());
     }
 
-    println!("Crosshair executables and app-menu entry removed. Your configuration was retained.");
-    Ok(())
+    #[cfg(target_os = "linux")]
+    {
+        println!(
+            "Crosshair executables and app-menu entry removed. Your configuration was retained."
+        );
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        Err("Uninstallation is not implemented for this platform.".into())
+    }
 }
 
 fn run() -> Result<(), String> {
@@ -495,7 +543,20 @@ fn run() -> Result<(), String> {
         {
             return install_autostart();
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "windows")]
+        {
+            let executable = install_bin_dir()?.join("crosshair.exe");
+            if !executable.is_file() {
+                return Err(format!(
+                    "Install Crosshair before enabling login startup: {}",
+                    executable.display()
+                ));
+            }
+            crosshair_core::windows::install_autostart(&executable)?;
+            println!("Optional Windows login startup enabled for the current user.");
+            return Ok(());
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
             return Err("Login autostart is not implemented for this platform yet.".into());
         }
@@ -505,7 +566,20 @@ fn run() -> Result<(), String> {
         {
             return remove_autostart();
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "windows")]
+        {
+            let removed = crosshair_core::windows::remove_autostart()?;
+            println!(
+                "{}",
+                if removed {
+                    "Windows login startup removed."
+                } else {
+                    "No Windows Crosshair login startup entry was installed."
+                }
+            );
+            return Ok(());
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
             return Err("Login autostart is not implemented for this platform yet.".into());
         }
@@ -535,7 +609,16 @@ fn run() -> Result<(), String> {
             );
             return Ok(());
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "windows")]
+        {
+            let monitors = crosshair_core::windows::list_monitors()?;
+            println!(
+                "{}",
+                serde_json::to_string(&monitors).map_err(|error| error.to_string())?
+            );
+            return Ok(());
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
             return Err("Monitor enumeration is not implemented for this platform yet.".into());
         }
@@ -561,7 +644,11 @@ fn run() -> Result<(), String> {
             }
             return Err("No Wayland or X11 display session was detected.".into());
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "windows")]
+        {
+            return crosshair_core::windows::run(config, paths);
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
             return Err("This platform's overlay backend is not built yet.".into());
         }
