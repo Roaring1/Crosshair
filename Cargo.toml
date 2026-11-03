@@ -22,13 +22,16 @@ required-features = ["settings-ui"]
 
 [features]
 default = []
-settings-ui = ["dep:slint"]
+settings-ui = ["dep:slint", "dep:i-slint-core"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
-slint = { version = "1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-software", "accessibility", "compat-1-18"], optional = true }
+slint = { version = "=1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-software", "accessibility", "compat-1-18"], optional = true }
+# Slint 1.18.1 does not expose a public system-accent setter. This pinned core
+# API lets KDE's selected AccentColor update the shared standard-widget palette.
+i-slint-core = { version = "=1.18.1", default-features = false, features = ["std"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 calloop = "0.14.5"

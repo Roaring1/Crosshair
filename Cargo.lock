@@ -886,6 +886,7 @@ version = "4.0.0"
 dependencies = [
  "calloop 0.14.5",
  "calloop-wayland-source 0.4.1",
+ "i-slint-core",
  "libc",
  "serde",
  "serde_json",

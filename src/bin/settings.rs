@@ -7,6 +7,8 @@ use slint::{
     VecModel,
 };
 use std::cell::RefCell;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 #[cfg(windows)]
 use std::fs::OpenOptions;
 #[cfg(windows)]
@@ -28,6 +30,117 @@ slint::include_modules!();
 
 const PREVIEW_SIZE: u32 = 240;
 const PREVIEW_SAFE_MARGIN: u32 = 12;
+
+/// Parse KDE's selected RGB accent from the General section of kdeglobals.
+/// Prefer AccentColor, matching Hearth, with LastUsedCustomAccentColor as
+/// a compatibility fallback.
+#[cfg(any(target_os = "linux", test))]
+fn parse_kde_accent(contents: &str) -> Option<[u8; 4]> {
+    fn parse_rgb(value: &str) -> Option<[u8; 4]> {
+        let parts: Vec<_> = value.split(',').map(str::trim).collect();
+        if !(parts.len() == 3 || parts.len() == 4) {
+            return None;
+        }
+        let mut rgba = [0, 0, 0, 255];
+        for (index, part) in parts.iter().enumerate() {
+            rgba[index] = part.parse::<u8>().ok()?;
+        }
+        Some(rgba)
+    }
+
+    let mut in_general = false;
+    let mut accent = None;
+    let mut last_used = None;
+
+    for raw_line in contents.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_general = &line[1..line.len() - 1] == "General";
+            continue;
+        }
+        if !in_general {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "AccentColor" => accent = parse_rgb(value),
+            "LastUsedCustomAccentColor" => last_used = parse_rgb(value),
+            _ => {}
+        }
+    }
+
+    accent.or(last_used)
+}
+
+#[cfg(target_os = "linux")]
+fn is_kde_desktop_session() -> bool {
+    ["XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .flat_map(|value| value.split(':').map(str::to_owned).collect::<Vec<_>>())
+        .any(|name| {
+            let name = name.trim().to_ascii_lowercase();
+            name == "kde" || name == "plasma" || name.starts_with("plasma-")
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn kdeglobals_path() -> Option<PathBuf> {
+    if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME") {
+        let path = PathBuf::from(config_home);
+        if path.is_absolute() {
+            return Some(path.join("kdeglobals"));
+        }
+    }
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/kdeglobals"))
+}
+
+#[cfg(target_os = "linux")]
+fn apply_kde_accent_color() {
+    let accent = kdeglobals_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|contents| parse_kde_accent(&contents));
+    let Some([red, green, blue, alpha]) = accent else {
+        return;
+    };
+    let color = slint::Color::from_argb_u8(alpha, red, green, blue);
+
+    // The XDG portal's KDE accent can be the selection color rather than the
+    // selected Plasma General/AccentColor. Push Hearth's KDE source of truth
+    // into Slint's shared Palette; standard sliders, switches and other
+    // interactive widgets then inherit it without per-control styling.
+    let _ = i_slint_core::context::with_global_context(
+        || unreachable!("SettingsWindow::new initialized the Slint context"),
+        |context| {
+            if context.accent_color() != color {
+                context.set_accent_color(color);
+            }
+        },
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn start_kde_accent_sync() -> Option<Timer> {
+    if !is_kde_desktop_session() {
+        return None;
+    }
+    let timer = Timer::default();
+    apply_kde_accent_color();
+    // Portal updates can arrive after startup and report the selection shade
+    // instead of General/AccentColor. Re-apply Plasma's own selected accent
+    // periodically so a Settings window also follows live desktop changes.
+    timer.start(
+        TimerMode::Repeated,
+        Duration::from_secs(2),
+        apply_kde_accent_color,
+    );
+    Some(timer)
+}
 
 #[cfg(windows)]
 fn trace_settings(paths: &AppPaths, message: &str) {
@@ -837,6 +950,8 @@ fn run() -> Result<(), String> {
     let mut initial = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
     initial.normalize();
     let ui = SettingsWindow::new().map_err(|error| error.to_string())?;
+    #[cfg(target_os = "linux")]
+    let kde_accent_timer = start_kde_accent_sync();
     let config = Arc::new(Mutex::new(initial.clone()));
     let last_auto_save = Arc::new(AtomicBool::new(initial.auto_save));
     let monitors = Rc::new(RefCell::new(discover_monitors()));
@@ -1215,6 +1330,10 @@ fn run() -> Result<(), String> {
     trace_settings(&paths, "UI event loop: entering");
     let run_result = ui.run().map_err(|error| error.to_string());
     trace_settings(&paths, "UI event loop: returned");
+    #[cfg(target_os = "linux")]
+    if let Some(timer) = kde_accent_timer {
+        timer.stop();
+    }
     ui_closing.store(true, Ordering::Release);
     close_quit_timer.stop();
     trace_settings(
@@ -1262,6 +1381,30 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kde_accent_prefers_plasma_general_accent_color() {
+        let contents = "[Colors:Selection]\nBackgroundNormal=173,51,118\n\n[General]\nAccentColor=233, 58, 154\nLastUsedCustomAccentColor=1,2,3\n";
+        assert_eq!(parse_kde_accent(contents), Some([233, 58, 154, 255]));
+    }
+
+    #[test]
+    fn kde_accent_falls_back_to_last_used_custom_color() {
+        let contents = "[General]\nAccentColor=999,58,154\nLastUsedCustomAccentColor=10,20,30,128\n";
+        assert_eq!(parse_kde_accent(contents), Some([10, 20, 30, 128]));
+    }
+
+    #[test]
+    fn kde_accent_ignores_values_outside_general_section() {
+        let contents = "[Colors:Selection]\nAccentColor=1,2,3\n[Other]\nAccentColor=4,5,6\n";
+        assert_eq!(parse_kde_accent(contents), None);
+    }
+
+    #[test]
+    fn kde_accent_rejects_malformed_values_without_fallback() {
+        let contents = "[General]\nAccentColor=1,2\nLastUsedCustomAccentColor=1,2,300\n";
+        assert_eq!(parse_kde_accent(contents), None);
+    }
 
     #[test]
     fn appearance_preview_is_independent_of_overlay_enabled_state() {
