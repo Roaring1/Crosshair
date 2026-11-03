@@ -1,9 +1,105 @@
 import { Button, CheckBox, ComboBox, LineEdit, Slider, SpinBox, Switch, ScrollView, Palette } from "std-widgets.slint";
 
+component ColorField inherits HorizontalLayout {
+    in-out property <string> value;
+    in property <color> swatch-color: #a000ff;
+    in property <bool> align-right: false;
+    callback committed();
+
+    spacing: 6px;
+    height: 28px;
+
+    color-palette := PopupWindow {
+        x: root.align-right ? root.width - self.width : 0px;
+        y: root.height;
+        width: 224px;
+        height: 190px;
+
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: Palette.background;
+            border-color: Palette.border;
+            border-width: 1px;
+            border-radius: 5px;
+
+            VerticalLayout {
+                padding: 9px;
+                spacing: 7px;
+
+                Text {
+                    text: "Choose a color";
+                    font-weight: 600;
+                }
+
+                GridLayout {
+                    columns: 6;
+                    spacing: 5px;
+
+                    Rectangle { width: 23px; height: 23px; background: #ef4444; border-radius: 4px; TouchArea { clicked => { root.value = "#ef4444"; root.committed(); color-palette.close(); } } }
+                    Rectangle { width: 23px; height: 23px; background: #f97316; border-radius: 4px; TouchArea { clicked => { root.value = "#f97316"; root.committed(); color-palette.close(); } } }
+                    Rectangle { width: 23px; height: 23px; background: #f59e0b; border-radius: 4px; TouchArea { clicked => { root.value = "#f59e0b"; root.committed(); color-palette.close(); } } }
+                    Rectangle { width: 23px; height: 23px; background: #eab308; border-radius: 4px; TouchArea { clicked => { root.value = "#eab308"; root.committed(); color-palette.close(); } } }
+                    Rectangle { width: 23px; height: 23px; background: #84cc16; border-radius: 4px; TouchArea { clicked => { root.value = "#84cc16"; root.committed(); color-palette.close(); } } }
+                    Rectangle { width: 23px; height: 23px; background: #22c55e; border-radius: 4px; TouchArea { clicked => { root.value = "#22c55e"; root.committed(); color-palette.close(); } } }
+
+                    Rectangle { width: 23px; height: 23px; background: #10b981; border-radius: 4px; TouchArea { clicked => { root.value = "#10b981"; root.committed(); color-palette.close(); } } }
+                    Rectangle { width: 23px; height: 23px; background: #14b8a6; border-radius: 4px; TouchArea { clicked => { root.value = "#14b8a6"; root.committed(); color-palette.close(); } } }
+                    Rectangle { width: 23px; height: 23px; background: #06b6d4; border-radius: 4px; TouchArea { clicked => { root.value = "#06b6d4"; root.committed(); color-palette.close(); } } }
+                    Rectangle { width: 23px; height: 23px; background: #0ea5e9; border-radius: 4px; TouchArea { clicked => { root.value = "#0ea5e9"; root.committed(); color-palette.close(); } } }
+                    Rectangle { width: 23px; height: 23px; background: #3b82f6; border-radius: 4px; TouchArea { clicked => { root.value = "#3b82f6"; root.committed(); color-palette.close(); } } }
+                    Rectangle { width: 23px; height: 23px; background: #6366f1; border-radius: 4px; TouchArea { clicked => { root.value = "#6366f1"; root.committed(); color-palette.close(); } } }
+
+                    Rectangle { width: 23px; height: 23px; background: #8b5cf6; border-radius: 4px; TouchArea { clicked => { root.value = "#8b5cf6"; root.committed(); color-palette.close(); } } }
+                    Rectangle { width: 23px; height: 23px; background: #a855f7; border-radius: 4px; TouchArea { clicked => { root.value = "#a855f7"; root.committed(); color-palette.close(); } } }
+                    Rectangle { width: 23px; height: 23px; background: #d946ef; border-radius: 4px; TouchArea { clicked => { root.value = "#d946ef"; root.committed(); color-palette.close(); } } }
+                    Rectangle { width: 23px; height: 23px; background: #ec4899; border-radius: 4px; TouchArea { clicked => { root.value = "#ec4899"; root.committed(); color-palette.close(); } } }
+                    Rectangle { width: 23px; height: 23px; background: #f43f5e; border-radius: 4px; TouchArea { clicked => { root.value = "#f43f5e"; root.committed(); color-palette.close(); } } }
+                    Rectangle { width: 23px; height: 23px; background: #ffffff; border-color: Palette.border; border-width: 1px; border-radius: 4px; TouchArea { clicked => { root.value = "#ffffff"; root.committed(); color-palette.close(); } } }
+
+                    Rectangle { width: 23px; height: 23px; background: #000000; border-color: Palette.border; border-width: 1px; border-radius: 4px; TouchArea { clicked => { root.value = "#000000"; root.committed(); color-palette.close(); } } }
+                    Rectangle { width: 23px; height: 23px; background: #1e293b; border-radius: 4px; TouchArea { clicked => { root.value = "#1e293b"; root.committed(); color-palette.close(); } } }
+                    Rectangle { width: 23px; height: 23px; background: #334155; border-radius: 4px; TouchArea { clicked => { root.value = "#334155"; root.committed(); color-palette.close(); } } }
+                    Rectangle { width: 23px; height: 23px; background: #64748b; border-radius: 4px; TouchArea { clicked => { root.value = "#64748b"; root.committed(); color-palette.close(); } } }
+                    Rectangle { width: 23px; height: 23px; background: #94a3b8; border-radius: 4px; TouchArea { clicked => { root.value = "#94a3b8"; root.committed(); color-palette.close(); } } }
+                    Rectangle { width: 23px; height: 23px; background: #cbd5e1; border-radius: 4px; TouchArea { clicked => { root.value = "#cbd5e1"; root.committed(); color-palette.close(); } } }
+                }
+
+                Text {
+                    text: "Choose a swatch or enter a custom HEX value in the field.";
+                    font-size: 11px;
+                    color: Palette.foreground;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        width: 28px;
+        height: 26px;
+        background: root.swatch-color;
+        border-color: Palette.border;
+        border-width: 1px;
+        border-radius: 4px;
+        TouchArea {
+            mouse-cursor: pointer;
+            clicked => { color-palette.show(); }
+        }
+    }
+
+    LineEdit {
+        text <=> root.value;
+        placeholder-text: "#RRGGBB";
+        horizontal-stretch: 1;
+        accepted => { root.committed(); }
+    }
+}
+
 export component SettingsWindow inherits Window {
-    title: "";
-    width: 560px;
-    height: (root.active-tab == 0 && !root.shortcuts-expanded && !root.profile-panel-visible ? 250px : 420px)
+    title: "Crosshair Settings";
+    width: 640px;
+    height: (root.active-tab == 0 && !root.shortcuts-expanded && !root.profile-panel-visible ? 280px : 520px)
         + (root.system-feedback != "" ? 44px : 0px);
     animate height {
         duration: 140ms;
@@ -143,11 +239,11 @@ export component SettingsWindow inherits Window {
     }
 
     VerticalLayout {
-        padding: 8px;
-        spacing: 6px;
+        padding: 10px;
+        spacing: 8px;
 
         HorizontalLayout {
-            height: 32px;
+            height: 34px;
             spacing: 4px;
             Button {
                 text: "General";
@@ -216,8 +312,8 @@ export component SettingsWindow inherits Window {
             width: 100%;
             height: 100%;
             VerticalLayout {
-                spacing: 6px;
-                padding: 4px;
+                spacing: 8px;
+                padding: 8px;
 
                 HorizontalLayout {
                     height: 30px;
@@ -301,15 +397,16 @@ export component SettingsWindow inherits Window {
         }
 
         if root.active-tab == 1: HorizontalLayout {
-            spacing: 14px;
+            spacing: 10px;
             height: 100%;
 
             ScrollView {
-                width: 318px;
+                width: 420px;
                 height: 100%;
                 VerticalLayout {
-                    spacing: 7px;
-                    padding: 3px;
+                    width: 100%;
+                    spacing: 8px;
+                    padding: 8px;
 
                     HorizontalLayout {
                         Text { text: "Shape"; width: 82px; vertical-alignment: center; }
@@ -343,8 +440,11 @@ export component SettingsWindow inherits Window {
 
                     HorizontalLayout {
                         Text { text: "Color"; width: 82px; vertical-alignment: center; }
-                        Rectangle { width: 18px; height: 18px; background: root.main-swatch; border-color: Palette.border; border-width: 1px; border-radius: 3px; }
-                        LineEdit { text <=> root.color-text; placeholder-text: "#RRGGBB"; accepted => { root.settings_changed(); } }
+                        ColorField {
+                            value <=> root.color-text;
+                            swatch-color: root.main-swatch;
+                            committed => { root.settings_changed(); }
+                        }
                     }
 
                     Rectangle { height: 1px; background: Palette.border; }
@@ -359,8 +459,11 @@ export component SettingsWindow inherits Window {
                         spacing: 5px;
                         HorizontalLayout {
                             Text { text: "Color"; width: 82px; }
-                            Rectangle { width: 18px; height: 18px; background: root.outline-swatch; border-color: Palette.border; border-width: 1px; border-radius: 3px; }
-                            LineEdit { text <=> root.outline-color-text; accepted => { root.settings_changed(); } }
+                            ColorField {
+                                value <=> root.outline-color-text;
+                                swatch-color: root.outline-swatch;
+                                committed => { root.settings_changed(); }
+                            }
                         }
                         HorizontalLayout {
                             Text { text: "Opacity"; width: 82px; }
@@ -382,8 +485,11 @@ export component SettingsWindow inherits Window {
                         spacing: 5px;
                         HorizontalLayout {
                             Text { text: "Color"; width: 82px; }
-                            Rectangle { width: 18px; height: 18px; background: root.shadow-swatch; border-color: Palette.border; border-width: 1px; border-radius: 3px; }
-                            LineEdit { text <=> root.shadow-color-text; accepted => { root.settings_changed(); } }
+                            ColorField {
+                                value <=> root.shadow-color-text;
+                                swatch-color: root.shadow-swatch;
+                                committed => { root.settings_changed(); }
+                            }
                         }
                         HorizontalLayout {
                             Text { text: "Opacity"; width: 82px; }
@@ -414,8 +520,11 @@ export component SettingsWindow inherits Window {
                         }
                         HorizontalLayout {
                             Text { text: "Color"; width: 82px; }
-                            Rectangle { width: 18px; height: 18px; background: root.reference-swatch; border-color: Palette.border; border-width: 1px; border-radius: 3px; }
-                            LineEdit { text <=> root.reference-color-text; accepted => { root.settings_changed(); } }
+                            ColorField {
+                                value <=> root.reference-color-text;
+                                swatch-color: root.reference-swatch;
+                                committed => { root.settings_changed(); }
+                            }
                         }
                         HorizontalLayout {
                             Text { text: "Size"; width: 82px; }
@@ -449,8 +558,8 @@ export component SettingsWindow inherits Window {
             Rectangle { width: 1px; background: Palette.border; }
 
             VerticalLayout {
-                width: 168px;
-                spacing: 6px;
+                width: 176px;
+                spacing: 8px;
                 Text { text: "Preview"; font-weight: 600; height: 22px; }
                 Rectangle {
                     background: root.preview-background;
@@ -458,7 +567,7 @@ export component SettingsWindow inherits Window {
                     border-color: Palette.border;
                     border-width: 1px;
                     width: 100%;
-                    height: 168px;
+                    height: 176px;
                     clip: true;
                     Image {
                         source: root.preview-image;
@@ -468,10 +577,15 @@ export component SettingsWindow inherits Window {
                     }
                 }
                 HorizontalLayout {
-                    height: 28px;
+                    height: 30px;
                     Text { text: "Background"; vertical-alignment: center; }
-                    Rectangle { width: 22px; height: 20px; background: root.preview-background; border-color: Palette.border; border-width: 1px; border-radius: 3px; }
-                    LineEdit { text <=> root.preview-background-text; accepted => { root.settings_changed(); } }
+                    ColorField {
+                        horizontal-stretch: 1;
+                        value <=> root.preview-background-text;
+                        swatch-color: root.preview-background;
+                        align-right: true;
+                        committed => { root.settings_changed(); }
+                    }
                 }
                 Button {
                     text: "Share code";
