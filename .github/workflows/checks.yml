@@ -148,6 +148,18 @@ jobs:
       - name: Test Settings close and independent overlay lifetime
         run: xvfb-run -a bash tests/settings-close-smoke.sh
 
+      - name: Capture Rust Settings UI screenshots
+        run: xvfb-run -a -s "-screen 0 1280x900x24" bash tests/settings-screenshots.sh
+
+      - name: Upload Rust Settings UI screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: crosshair-rust-settings-ui
+          path: artifacts/settings-ui/
+          if-no-files-found: warn
+          retention-days: 14
+
   rust-windows-compile:
     name: Rust compile / Windows
     runs-on: windows-latest
