@@ -2,7 +2,7 @@
 
 ## Latest checkpoint — 2026-11-03
 
-The current source checkpoint is 9ce53cfab1c4a4cb3f5c1f7a88318a2d946d3aed (desktop accent integration), on top of e8dabff5890a90e984818bb6c0860bf01dee7e29 (Windows Settings close fix). These commits are intended for the existing draft PR #3.
+The current source checkpoint is 59e4ee846cdb0dd5ae550bd8aed3ab9f2ec7b527 (formatting follow-up), including desktop accent integration from 9ce53cfab1c4a4cb3f5c1f7a88318a2d946d3aed, on top of e8dabff5890a90e984818bb6c0860bf01dee7e29 (Windows Settings close fix). These commits are intended for the existing draft PR #3.
 
 ### Windows 11 laptop validation
 
@@ -19,11 +19,11 @@ The current source checkpoint is 9ce53cfab1c4a4cb3f5c1f7a88318a2d946d3aed (deskt
 - KDE's XDG portal accent on Nobara reports the selection color (#ad3376), while Hearth reads Plasma's selected [General] AccentColor=233,58,154 (#e93a9a). Crosshair now reads AccentColor from the active KDE config home, falls back to LastUsedCustomAccentColor, and updates Slint's shared palette. A two-second UI timer reapplies the selected Plasma accent after portal updates and follows changes while Settings remains open. Standard Slint controls inherit the palette; the crosshair overlay's actual configured color is untouched.
 - The KDE Settings path was exercised under a private Xvfb display using a copy of the real kdeglobals, with KDE session markers enabled. After the portal watcher and override timer had time to run, the captured Settings screen contained the expected saturated pink/magenta accent on the controls. The user's active desktop and real config were not changed.
 - Four parser regression tests cover AccentColor precedence, LastUsedCustomAccentColor fallback, section isolation, and malformed/out-of-range values. The latest local cargo check --locked --features settings-ui --all-targets passed, and all 56 Rust tests passed (32 core, 18 Linux backend, 6 Settings).
-- This uses the Slint 1.18.1 internal i-slint-core context setter because Slint 1.18.1 exposes no public accent override API. Both slint and i-slint-core are pinned to exactly 1.18.1 so the setter cannot accidentally target a second/different context after an ordinary compatible-version update. Review this integration when upgrading Slint. The new accent commit still requires hosted Linux/Windows CI and a Windows package rebuild.
+- This uses the Slint 1.18.1 internal i-slint-core context setter because Slint 1.18.1 exposes no public accent override API. Both slint and i-slint-core are pinned to exactly 1.18.1 so the setter cannot accidentally target a second/different context after an ordinary compatible-version update. Review this integration when upgrading Slint. The first CI attempt on the accent commit (#182) stopped at rustfmt on two formatting-only differences; the follow-up style commit 59e4ee8 corrects both. Python 3.10–3.14 and the dependency audit passed on #182, but its Rust jobs did not proceed past formatting. A new full Linux/Windows run is required before package rebuild.
 
 ### Remaining acceptance gates
 
-- Run hosted CI on 9ce53cf and install the resulting package on Windows to validate the final exact source head.
+- Run hosted CI on 59e4ee8 and install the resulting package on Windows to validate the final exact source head.
 - Test mixed/fractional DPI, multi-monitor attach/detach, and fullscreen-game behavior on real hardware; the Windows laptop currently has only one active display.
 - Perform a deliberate visual/click-through/fullscreen validation on the active KDE Wayland desktop; private Xvfb and KWin compositor tests do not replace this.
 - Decide whether the known system-tray parity gap is acceptable before closing PR #3.
