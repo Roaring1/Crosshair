@@ -122,10 +122,13 @@ try {
     }
     $null = Invoke-Crosshair -Arguments @("--autostart")
     $runValue = (Get-ItemProperty -LiteralPath $RunKey -Name "Crosshair").Crosshair
-    if ($runValue -notmatch [regex]::Escape($Bin) -or
-        $runValue -notmatch "--daemon" -or
-        $runValue -notmatch "-WindowStyle Hidden") {
-        throw "Opt-in login startup did not launch the installed Rust daemon without a console window."
+    $normalizedRun = $runValue.Replace("/", "\\")
+    $normalizedBin = $Bin.Replace("/", "\\")
+    $autostartPathMatches = $normalizedRun.IndexOf($normalizedBin, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    if (-not $autostartPathMatches -or
+        $normalizedRun -notmatch "--daemon" -or
+        $normalizedRun -notmatch "-WindowStyle Hidden") {
+        throw ("Opt-in login startup registry value is not configured for the hidden Rust daemon. Actual Run value: " + $runValue)
     }
     $null = Invoke-Crosshair -Arguments @("--remove-autostart")
     $runProperties = Get-ItemProperty -LiteralPath $RunKey -ErrorAction SilentlyContinue
@@ -197,9 +200,18 @@ try {
         throw "Toggle-off did not leave the overlay disabled: $status"
     }
 
-    Write-Host "[9/9] uninstall Rust binaries and preserve per-user configuration"
-    & (Join-Path $Package "Uninstall-Crosshair.ps1")
-    if ($LASTEXITCODE -ne 0) { throw "Windows uninstall script failed." }
+    Write-Host "[9/9] uninstall through the installed CLI from its own working directory"
+    $uninstallProcess = Start-Process -FilePath $Bin -ArgumentList "--uninstall" -WorkingDirectory $InstallDir -WindowStyle Hidden -Wait -PassThru
+    if ($uninstallProcess.ExitCode -ne 0) {
+        throw "The in-app uninstall command failed with exit code $($uninstallProcess.ExitCode)."
+    }
+    $uninstallDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    while ([DateTime]::UtcNow -lt $uninstallDeadline -and (Test-Path -LiteralPath $InstallDir)) {
+        Start-Sleep -Milliseconds 100
+    }
+    if (Test-Path -LiteralPath $InstallDir) {
+        throw "The deferred installer did not remove the installation directory after the CLI exited."
+    }
     if ((Test-Path -LiteralPath $Bin -PathType Leaf) -or
         (Test-Path -LiteralPath $Settings -PathType Leaf) -or
         (Test-Path -LiteralPath $StartMenuShortcut -PathType Leaf)) {

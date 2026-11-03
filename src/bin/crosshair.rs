@@ -498,6 +498,10 @@ fn uninstall() -> Result<(), String> {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
+            // Settings is normally launched with the install folder as its
+            // working directory. The uninstaller must run elsewhere so it can
+            // remove that folder after Settings and this CLI have exited.
+            .current_dir(std::env::temp_dir())
             .spawn()
             .map_err(|error| {
                 format!("Could not start the deferred Windows uninstaller: {error}")
