@@ -46,7 +46,7 @@ Write-SmokeLog "Starting Windows installer/overlay/Settings/uninstall smoke test
 function Invoke-Crosshair {
     param(
         [Parameter(ValueFromRemainingArguments = $true)][string[]] $Arguments,
-        [int] $TimeoutMilliseconds = 10000
+        [int] $TimeoutMilliseconds = 15000
     )
     $label = "crosshair " + ($Arguments -join " ")
     Write-SmokeLog ("CLI START: " + $label)
@@ -70,16 +70,33 @@ function Invoke-Crosshair {
     if (-not $process.WaitForExit($TimeoutMilliseconds)) {
         try { $process.Kill($true) } catch {}
         try { $process.WaitForExit(2000) | Out-Null } catch {}
-        $timeoutStdout = ""
-        $timeoutStderr = ""
-        try { $timeoutStdout = $stdoutTask.GetAwaiter().GetResult() } catch {}
-        try { $timeoutStderr = $stderrTask.GetAwaiter().GetResult() } catch {}
-        Write-SmokeLog ("CLI TIMEOUT: " + $label + " exceeded " + $TimeoutMilliseconds + " ms; process tree was terminated.")
-        if (-not [string]::IsNullOrWhiteSpace($timeoutStdout)) {
-            Write-SmokeLog ("CLI TIMEOUT STDOUT: " + $timeoutStdout.Trim())
+        Write-SmokeLog ("CLI TIMEOUT: " + $label + " exceeded " + $TimeoutMilliseconds + " ms; process tree termination was requested.")
+        if ($stdoutTask.IsCompleted) {
+            try {
+                $timeoutStdout = $stdoutTask.GetAwaiter().GetResult()
+                if (-not [string]::IsNullOrWhiteSpace($timeoutStdout)) {
+                    Write-SmokeLog ("CLI TIMEOUT STDOUT: " + $timeoutStdout.Trim())
+                }
+            } catch {}
+        } else {
+            Write-SmokeLog "CLI stdout capture remained open after timeout; it will not be awaited."
         }
-        if (-not [string]::IsNullOrWhiteSpace($timeoutStderr)) {
-            Write-SmokeLog ("CLI TIMEOUT STDERR: " + $timeoutStderr.Trim())
+        if ($stderrTask.IsCompleted) {
+            try {
+                $timeoutStderr = $stderrTask.GetAwaiter().GetResult()
+                if (-not [string]::IsNullOrWhiteSpace($timeoutStderr)) {
+                    Write-SmokeLog ("CLI TIMEOUT STDERR: " + $timeoutStderr.Trim())
+                }
+            } catch {}
+        } else {
+            Write-SmokeLog "CLI stderr capture remained open after timeout; it will not be awaited."
+        }
+        $daemonLog = Join-Path $env:LOCALAPPDATA "Crosshair\crosshair.log"
+        if (Test-Path -LiteralPath $daemonLog -PathType Leaf) {
+            Write-SmokeLog "Captured Windows daemon diagnostic log:"
+            Get-Content -LiteralPath $daemonLog | ForEach-Object { Write-SmokeLog ("DAEMON: " + $_) }
+        } else {
+            Write-SmokeLog "No Windows daemon diagnostic log was created."
         }
         $process.Dispose()
         throw ($label + " timed out after " + $TimeoutMilliseconds + " ms.")

@@ -17,7 +17,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(unix)]
@@ -106,19 +106,33 @@ fn launch_settings() -> Result<(), String> {
     Ok(())
 }
 
-fn spawn_daemon() -> Result<(), String> {
+fn spawn_daemon(paths: &AppPaths) -> Result<(), String> {
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let mut command = Command::new(executable);
     command.arg("--daemon");
     #[cfg(windows)]
-    {
+    let stderr = {
         use std::os::windows::process::CommandExt;
         command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-    }
+        let parent = paths
+            .log_file
+            .parent()
+            .ok_or_else(|| "Crosshair log path has no parent directory".to_string())?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create Crosshair log directory: {error}"))?;
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&paths.log_file)
+            .map_err(|error| format!("Could not open Crosshair startup log: {error}"))?;
+        Stdio::from(log)
+    };
+    #[cfg(not(windows))]
+    let stderr = Stdio::null();
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(stderr)
         .spawn()
         .map_err(|error| format!("Could not start Crosshair: {error}"))?;
     Ok(())
@@ -130,8 +144,9 @@ fn start_enabled(paths: &AppPaths) -> Result<(), String> {
     config
         .save_atomic(&paths.config_file)
         .map_err(|error| error.to_string())?;
-    spawn_daemon()?;
-    for _ in 0..80 {
+    spawn_daemon(paths)?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
         thread::sleep(Duration::from_millis(25));
         if let Ok(response) = send_command(paths, "status", None) {
             if response.get("enabled").and_then(serde_json::Value::as_bool) == Some(true) {
@@ -139,7 +154,7 @@ fn start_enabled(paths: &AppPaths) -> Result<(), String> {
             }
         }
     }
-    Err("Crosshair did not become ready. Run crosshair --doctor for diagnostics.".into())
+    Err("Crosshair did not become ready within ten seconds. Run crosshair --doctor for diagnostics.".into())
 }
 
 fn ensure_running_then(paths: &AppPaths, command: &str) -> Result<(), String> {

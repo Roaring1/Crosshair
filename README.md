@@ -129,6 +129,8 @@ crosshair --uninstall
 | App-menu / Start Menu | `${XDG_DATA_HOME:-~/.local/share}/applications/crosshair.desktop` | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Crosshair.lnk` |
 | Log | `${XDG_STATE_HOME:-~/.local/state}/crosshair/crosshair.log` | `%LOCALAPPDATA%\Crosshair\crosshair.log` |
 
+On Windows, daemon startup, display discovery, overlay creation, and named-pipe request stages are appended to the Crosshair log under `%LOCALAPPDATA%\Crosshair\crosshair.log`.
+
 The legacy Python source in this branch is retained as a compatibility and renderer-parity reference for CI. It is not installed or launched by the native Rust package. The established Python application and its release history remain on `main`.
 
 ## Validation

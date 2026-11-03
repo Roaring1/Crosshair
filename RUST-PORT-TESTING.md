@@ -90,9 +90,17 @@ hicolor icon directory, references it from the desktop entry, rejects a
 symlink at the icon destination before changing any other install artifact,
 and removes the icon during uninstall while retaining configuration.
 
+The Windows CLI uses overlapped named-pipe reads and writes with a shared
+three-second deadline. Cold-start readiness is bounded to ten seconds. A
+Windows-native regression test connects to a server that deliberately never
+replies and verifies that the client returns a timeout within five seconds.
+
 The Windows smoke runs every CLI command through a bounded process wrapper
-that captures stdout/stderr and kills only a timed-out test process. It writes
-per-command stage diagnostics to `RUNNER_TEMP`; the workflow uploads those
-logs even when the integration step fails or reaches its timeout. This makes
-named-pipe or deferred-uninstall stalls diagnosable instead of leaving the
-Windows job indefinitely opaque.
+that captures stdout/stderr and terminates a timed-out CLI process tree. On
+timeout it does not wait on output streams that may remain open through a
+descendant; it records whether the streams completed. It writes per-command
+stage diagnostics to `RUNNER_TEMP`; the workflow uploads those logs even when
+the integration step fails or reaches its timeout. The Windows daemon also
+records startup, monitor enumeration, overlay creation and IPC
+request/response milestones in `%LOCALAPPDATA%\Crosshair\crosshair.log`;
+the timeout handler includes that application log in the uploaded artifact.

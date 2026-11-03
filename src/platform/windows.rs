@@ -10,9 +10,10 @@ use crate::{APP_ID, APP_VERSION, AppPaths, Config, MonitorDescriptor};
 use serde_json::{Value, json};
 use std::collections::hash_map::DefaultHasher;
 use std::ffi::c_void;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::io::{BufReader, Write};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::mem::size_of;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::Path;
@@ -21,8 +22,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use windows_sys::Win32::Foundation::{
-    ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, HWND, LPARAM, POINT,
-    SIZE, WPARAM,
+    CloseHandle, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE,
+    GetLastError, HANDLE, HWND, LPARAM, POINT, SIZE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    WPARAM,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
@@ -32,10 +34,11 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING,
-    PIPE_ACCESS_DUPLEX,
+    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
+    OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT, WaitNamedPipeW,
@@ -44,7 +47,9 @@ use windows_sys::Win32::System::Registry::{
     HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
     RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW,
 };
-use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+use windows_sys::Win32::System::Threading::{
+    CreateEventW, GetCurrentThreadId, ResetEvent, WaitForSingleObject,
+};
 use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     SetProcessDpiAwarenessContext,
@@ -72,6 +77,25 @@ const OVERLAY_EX_STYLE: u32 =
     WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
 
 static MAIN_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+
+fn trace(paths: &AppPaths, message: &str) {
+    let Some(parent) = paths.log_file.parent() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(parent);
+    let Ok(mut log) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&paths.log_file)
+    else {
+        return;
+    };
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    let _ = writeln!(log, "[{timestamp}] windows: {message}");
+}
 
 #[derive(Clone)]
 struct Monitor {
@@ -524,6 +548,7 @@ fn register_overlay_class() -> Result<(Vec<u16>, windows_sys::Win32::Foundation:
 }
 
 fn refresh_windows(
+    paths: &AppPaths,
     config: &Config,
     windows: &mut Vec<OverlayWindow>,
     class_name: &[u16],
@@ -536,18 +561,23 @@ fn refresh_windows(
         return Ok(());
     }
 
+    trace(paths, "overlay refresh: enumerating displays");
     let monitors = enumerate_monitors()?;
+    trace(paths, &format!("overlay refresh: {} displays discovered", monitors.len()));
     let selected = selected_monitors(config, &monitors);
+    trace(paths, &format!("overlay refresh: {} displays selected", selected.len()));
     let previous = std::mem::take(windows);
     let mut next: Vec<OverlayWindow> = Vec::with_capacity(selected.len());
 
     for monitor in selected {
+        trace(paths, &format!("overlay refresh: preparing display {}", monitor.name));
         let hwnd = if let Some(index) = previous
             .iter()
             .position(|window| window.monitor == monitor.handle)
         {
             previous[index].hwnd
         } else {
+            trace(paths, &format!("overlay refresh: creating window for {}", monitor.name));
             let hwnd = unsafe {
                 CreateWindowExW(
                     OVERLAY_EX_STYLE,
@@ -576,7 +606,9 @@ fn refresh_windows(
             hwnd
         };
 
+        trace(paths, &format!("overlay refresh: updating layered surface for {}", monitor.name));
         if let Err(error) = update_layered_window(hwnd, &monitor, config) {
+            trace(paths, &format!("overlay refresh: layered surface failed for {}: {error}", monitor.name));
             unsafe { DestroyWindow(hwnd) };
             for window in next.drain(..) {
                 unsafe { DestroyWindow(window.hwnd) };
@@ -586,6 +618,7 @@ fn refresh_windows(
             }
             return Err(error);
         }
+        trace(paths, &format!("overlay refresh: display {} ready", monitor.name));
         next.push(OverlayWindow {
             monitor: monitor.handle,
             hwnd,
@@ -683,7 +716,9 @@ fn process_request(
     let result: Result<Value, String> = (|| match command {
         "status" => {
             let current = config.lock().map_err(|_| "Configuration lock poisoned")?;
+            trace(paths, "IPC status request: enumerating displays");
             let monitors = enumerate_monitors()?;
+            trace(paths, &format!("IPC status request: {} displays enumerated", monitors.len()));
             Ok(json!({
                 "ok": true,
                 "version": APP_VERSION,
@@ -778,24 +813,184 @@ fn named_pipe_server(
                 if error == windows_sys::Win32::Foundation::ERROR_NO_DATA {
                     continue;
                 }
+                trace(&paths, &format!("IPC listener failed (Windows error {error})"));
                 return Err(format!(
                     "Could not accept a Crosshair named-pipe client (Windows error {error})"
                 ));
             }
         }
 
+        trace(&paths, "IPC client connected");
         let response = match crate::read_bounded_line(BufReader::new(&mut file)) {
-            Ok(request) => process_request(&request, &config, &paths, &running, main_thread).0,
-            Err(error) => json!({"ok": false, "message": format!("Invalid IPC frame: {error}")}),
+            Ok(request) => {
+                let command = serde_json::from_slice::<Value>(&request)
+                    .ok()
+                    .and_then(|value| value.get("cmd").and_then(Value::as_str).map(str::to_owned))
+                    .unwrap_or_else(|| "invalid".into());
+                trace(&paths, &format!("IPC request received: {command}"));
+                let response = process_request(&request, &config, &paths, &running, main_thread).0;
+                trace(&paths, &format!("IPC request completed: {command}"));
+                response
+            }
+            Err(error) => {
+                trace(&paths, &format!("IPC frame read failed: {error}"));
+                json!({"ok": false, "message": format!("Invalid IPC frame: {error}")})
+            }
         };
         if let Ok(mut bytes) = serde_json::to_vec(&response) {
             bytes.push(b'\n');
             let _ = file.write_all(&bytes);
             let _ = file.flush();
+            trace(&paths, "IPC response written");
         }
         unsafe { DisconnectNamedPipe(handle) };
     }
     Ok(())
+}
+
+const PIPE_IO_TIMEOUT: Duration = Duration::from_secs(3);
+
+struct PipeEvent(HANDLE);
+
+impl PipeEvent {
+    fn new() -> Result<Self, String> {
+        let event = unsafe { CreateEventW(null(), 1, 0, null()) };
+        if event.is_null() {
+            return Err(last_error("Could not create a named-pipe I/O event"));
+        }
+        Ok(Self(event))
+    }
+}
+
+impl Drop for PipeEvent {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+fn finish_overlapped_io(
+    handle: HANDLE,
+    overlapped: &mut OVERLAPPED,
+    started: i32,
+    deadline: Instant,
+    context: &str,
+) -> Result<u32, String> {
+    if started == 0 {
+        let error = unsafe { GetLastError() };
+        if error != ERROR_IO_PENDING {
+            return Err(format!("{context} failed (Windows error {error})"));
+        }
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .min(u32::MAX as u128) as u32;
+        let wait = unsafe { WaitForSingleObject(overlapped.hEvent, remaining) };
+        if wait == WAIT_TIMEOUT {
+            unsafe {
+                CancelIoEx(handle, overlapped);
+                // The OVERLAPPED structure and event must remain alive until
+                // cancellation has completed.
+                WaitForSingleObject(overlapped.hEvent, u32::MAX);
+            }
+            return Err(format!("{context} timed out"));
+        }
+        if wait == WAIT_FAILED {
+            let error = unsafe { GetLastError() };
+            unsafe {
+                CancelIoEx(handle, overlapped);
+                WaitForSingleObject(overlapped.hEvent, u32::MAX);
+            }
+            return Err(format!(
+                "{context} wait failed (Windows error {error})"
+            ));
+        }
+        if wait != WAIT_OBJECT_0 {
+            unsafe {
+                CancelIoEx(handle, overlapped);
+                WaitForSingleObject(overlapped.hEvent, u32::MAX);
+            }
+            return Err(format!("{context} returned unexpected wait result {wait}"));
+        }
+    }
+
+    let mut transferred = 0u32;
+    if unsafe { GetOverlappedResult(handle, overlapped, &mut transferred, 0) } == 0 {
+        return Err(last_error(context));
+    }
+    Ok(transferred)
+}
+
+fn write_pipe_bytes(handle: HANDLE, bytes: &[u8], deadline: Instant) -> Result<(), String> {
+    let event = PipeEvent::new()?;
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        if unsafe { ResetEvent(event.0) } == 0 {
+            return Err(last_error("Could not reset the named-pipe write event"));
+        }
+        let mut overlapped = OVERLAPPED::default();
+        overlapped.hEvent = event.0;
+        let remaining = &bytes[offset..];
+        let started = unsafe {
+            WriteFile(
+                handle,
+                remaining.as_ptr(),
+                remaining.len() as u32,
+                null_mut(),
+                &mut overlapped,
+            )
+        };
+        let written = finish_overlapped_io(
+            handle,
+            &mut overlapped,
+            started,
+            deadline,
+            "Could not write to the Crosshair named pipe",
+        )?;
+        if written == 0 {
+            return Err("Crosshair named pipe accepted a zero-byte write".into());
+        }
+        offset += written as usize;
+    }
+    Ok(())
+}
+
+fn read_pipe_line(handle: HANDLE, deadline: Instant) -> Result<Vec<u8>, String> {
+    let event = PipeEvent::new()?;
+    let mut response = Vec::with_capacity(128);
+    loop {
+        if unsafe { ResetEvent(event.0) } == 0 {
+            return Err(last_error("Could not reset the named-pipe read event"));
+        }
+        let mut overlapped = OVERLAPPED::default();
+        overlapped.hEvent = event.0;
+        let mut byte = 0u8;
+        let started = unsafe {
+            ReadFile(
+                handle,
+                &mut byte,
+                1,
+                null_mut(),
+                &mut overlapped,
+            )
+        };
+        let read = finish_overlapped_io(
+            handle,
+            &mut overlapped,
+            started,
+            deadline,
+            "Could not read from the Crosshair named pipe",
+        )?;
+        if read == 0 {
+            return Err("Crosshair named pipe closed before replying".into());
+        }
+        response.push(byte);
+        if response.len() > crosshair_ipc_limit() {
+            return Err("Crosshair named-pipe response exceeds 64 KiB".into());
+        }
+        if byte == b'\n' {
+            return Ok(response);
+        }
+    }
 }
 
 pub fn send_command(
@@ -807,21 +1002,24 @@ pub fn send_command(
     if unsafe { WaitNamedPipeW(name.as_ptr(), PIPE_CONNECT_TIMEOUT_MS) } == 0 {
         return Err("Crosshair overlay is not running".into());
     }
-    let handle = unsafe {
+    let raw_handle = unsafe {
         CreateFileW(
             name.as_ptr(),
             GENERIC_READ | GENERIC_WRITE,
             0,
             null(),
             OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
             null_mut(),
         )
     };
-    if handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+    if raw_handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
         return Err(last_error("Could not connect to the Crosshair named pipe"));
     }
-    let mut file = unsafe { File::from_raw_handle(handle as _) };
+    // Keep the handle owned by a File while the Win32 overlapped APIs operate
+    // on its raw HANDLE. Every request/response shares one monotonic deadline.
+    let file = unsafe { File::from_raw_handle(raw_handle as _) };
+    let handle = file.as_raw_handle() as HANDLE;
     let mut request = json!({"cmd": command});
     if let Some(payload) = payload {
         request["payload"] = payload;
@@ -831,9 +1029,9 @@ pub fn send_command(
         return Err("Control request exceeds 64 KiB".into());
     }
     bytes.push(b'\n');
-    file.write_all(&bytes).map_err(|error| error.to_string())?;
-    file.flush().map_err(|error| error.to_string())?;
-    let response = crate::read_bounded_line(BufReader::new(&mut file))
+    let deadline = Instant::now() + PIPE_IO_TIMEOUT;
+    write_pipe_bytes(handle, &bytes, deadline)?;
+    let response = read_pipe_line(handle, deadline)
         .map_err(|error| format!("Invalid response from Crosshair: {error}"))?;
     let response: Value = serde_json::from_slice(&response).map_err(|error| error.to_string())?;
     if response.get("ok").and_then(Value::as_bool) != Some(true) {
@@ -851,11 +1049,15 @@ fn crosshair_ipc_limit() -> usize {
 }
 
 pub fn run(config: Config, paths: AppPaths) -> Result<(), String> {
+    trace(&paths, "daemon startup: begin");
     enable_per_monitor_dpi_awareness();
+    trace(&paths, "daemon startup: DPI awareness configured");
     paths
         .ensure_runtime_dir()
         .map_err(|error| error.to_string())?;
+    trace(&paths, "daemon startup: runtime directory ready");
     let (class_name, instance) = register_overlay_class()?;
+    trace(&paths, "daemon startup: window class registered");
     let mut message = MSG::default();
     unsafe { PeekMessageW(&mut message, null_mut(), 0, 0, PM_NOREMOVE) };
 
@@ -869,12 +1071,16 @@ pub fn run(config: Config, paths: AppPaths) -> Result<(), String> {
         .lock()
         .map_err(|_| "Configuration lock poisoned")?
         .clone();
-    if let Err(error) = refresh_windows(&initial_config, &mut windows, &class_name, instance) {
+    trace(&paths, "daemon startup: creating initial overlay windows");
+    if let Err(error) = refresh_windows(&paths, &initial_config, &mut windows, &class_name, instance) {
         MAIN_THREAD_ID.store(0, Ordering::Release);
         unsafe { UnregisterClassW(class_name.as_ptr(), instance) };
+        trace(&paths, &format!("daemon startup: initial overlay creation failed: {error}"));
         return Err(error);
     }
+    trace(&paths, &format!("daemon startup: initial overlay windows ready ({})", windows.len()));
 
+    trace(&paths, "daemon startup: creating named pipe");
     let pipe = match create_pipe_server(&pipe_name(), true) {
         Ok(pipe) => pipe,
         Err(error) => {
@@ -882,9 +1088,11 @@ pub fn run(config: Config, paths: AppPaths) -> Result<(), String> {
                 unsafe { DestroyWindow(window.hwnd) };
             }
             unsafe { UnregisterClassW(class_name.as_ptr(), instance) };
+            trace(&paths, &format!("daemon startup: named pipe creation failed: {error}"));
             return Err(error);
         }
     };
+    trace(&paths, "daemon startup: named pipe created");
     let worker_config = config.clone();
     let worker_running = running.clone();
     let worker_paths = paths.clone();
@@ -894,16 +1102,18 @@ pub fn run(config: Config, paths: AppPaths) -> Result<(), String> {
             let result = named_pipe_server(
                 pipe,
                 worker_config,
-                worker_paths,
+                worker_paths.clone(),
                 worker_running,
                 main_thread,
             );
-            if result.is_err() {
+            if let Err(error) = &result {
+                trace(&worker_paths, &format!("IPC worker stopped with error: {error}"));
                 unsafe { PostThreadMessageW(main_thread, WM_QUIT, 0, 0) };
             }
             result
         })
         .map_err(|error| format!("Could not start the Windows IPC worker: {error}"))?;
+    trace(&paths, "daemon startup: IPC worker started; entering message loop");
 
     loop {
         let result = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
@@ -915,7 +1125,7 @@ pub fn run(config: Config, paths: AppPaths) -> Result<(), String> {
                 .lock()
                 .map_err(|_| "Configuration lock poisoned")?
                 .clone();
-            if let Err(error) = refresh_windows(&current, &mut windows, &class_name, instance) {
+            if let Err(error) = refresh_windows(&paths, &current, &mut windows, &class_name, instance) {
                 eprintln!("Crosshair Windows overlay refresh failed: {error}");
             }
         } else {
@@ -940,12 +1150,20 @@ pub fn run(config: Config, paths: AppPaths) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{pipe_name, run, send_command};
+    use super::{
+        PIPE_IO_TIMEOUT, create_pipe_server, pipe_name, run, send_command,
+    };
     use crate::{AppPaths, Config};
     use serde_json::json;
     use std::fs;
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::Mutex;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+    use windows_sys::Win32::Foundation::{ERROR_PIPE_CONNECTED, GetLastError, HANDLE};
+    use windows_sys::Win32::System::Pipes::ConnectNamedPipe;
+
+    static PIPE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn named_pipe_is_local_and_uses_a_stable_per_user_name() {
@@ -981,7 +1199,46 @@ mod tests {
     }
 
     #[test]
+    fn windows_named_pipe_client_times_out_when_peer_never_replies() {
+        let _pipe_guard = PIPE_TEST_LOCK.lock().unwrap();
+        let listener = create_pipe_server(&pipe_name(), true)
+            .expect("silent named-pipe test server should be created");
+        let server = thread::spawn(move || {
+            let handle = listener.as_raw_handle() as HANDLE;
+            let connected = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
+            if connected == 0 {
+                let error = unsafe { GetLastError() };
+                assert_eq!(
+                    error, ERROR_PIPE_CONNECTED,
+                    "named-pipe client should connect to the waiting test server"
+                );
+            }
+            // The client can write into the pipe buffer, but this peer never
+            // reads or sends a reply. Its request must be bounded by the
+            // client's overlapped-I/O deadline.
+            thread::sleep(PIPE_IO_TIMEOUT + Duration::from_millis(500));
+            drop(listener);
+        });
+
+        let paths = AppPaths::discover().expect("Windows app paths should resolve");
+        let started = Instant::now();
+        let error = send_command(&paths, "status", None)
+            .expect_err("a silent named-pipe peer must not produce a successful status");
+        let elapsed = started.elapsed();
+        assert!(
+            error.contains("timed out"),
+            "expected a finite pipe timeout, got: {error}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "named-pipe timeout exceeded the expected bound: {elapsed:?}"
+        );
+        server.join().expect("silent test server should exit cleanly");
+    }
+
+    #[test]
     fn windows_overlay_named_pipe_round_trip_and_shutdown() {
+        let _pipe_guard = PIPE_TEST_LOCK.lock().unwrap();
         let _monitors = super::list_monitors().expect("Windows must expose at least one display");
         let directory = tempfile::tempdir().unwrap();
         let paths = AppPaths {
