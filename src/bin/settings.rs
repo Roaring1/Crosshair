@@ -835,6 +835,8 @@ fn run() -> Result<(), String> {
     // Slint hides the native window and destroys its X11/Wayland surface.
     let close_requested = ui_closing.clone();
     let close_timer = timer.clone();
+    let close_quit_timer = Rc::new(Timer::default());
+    let close_quit_timer_callback = close_quit_timer.clone();
     let close_paths = paths.clone();
     ui.window().on_close_requested(move || {
         trace_settings(
@@ -844,38 +846,37 @@ fn run() -> Result<(), String> {
         close_requested.store(true, Ordering::Release);
         close_timer.stop();
 
-        // Let Slint finish the native hide after this callback. Queue the loop
-        // quit for the next event-loop turn: on Windows, the Winit backend can
-        // deliver CloseRequested while the native window is still registered,
-        // and quitting before the deferred hide is processed can leave the
-        // Settings process alive with no visible window.
-        let deferred_quit_paths = close_paths.clone();
-        match slint::invoke_from_event_loop(move || {
-            trace_settings(
-                &deferred_quit_paths,
-                "window close: deferred event-loop quit callback entered",
-            );
-            match slint::quit_event_loop() {
-                Ok(()) => trace_settings(
-                    &deferred_quit_paths,
-                    "window close: deferred Slint event-loop quit scheduled",
-                ),
-                Err(error) => trace_settings(
-                    &deferred_quit_paths,
-                    &format!("window close: deferred event-loop quit failed: {error}"),
-                ),
-            }
-        }) {
-            Ok(()) => trace_settings(
-                &close_paths,
-                "window close: deferred event-loop quit queued",
-            ),
-            Err(error) => trace_settings(
-                &close_paths,
-                &format!("window close: could not queue event-loop quit: {error}"),
-            ),
-        }
-        slint::CloseRequestResponse::HideWindow
+        // Keep the native window alive until ComponentHandle::run() regains
+        // control and performs its normal hide. A one-shot Slint timer moves
+        // the quit request to the next event-loop turn; this avoids re-entering
+        // Winit's Windows close dispatch while its native HWND is being torn
+        // down, and does not leave a thread or polling timer behind.
+        let quit_paths = close_paths.clone();
+        close_quit_timer_callback.start(
+            TimerMode::SingleShot,
+            Duration::from_millis(25),
+            move || {
+                trace_settings(
+                    &quit_paths,
+                    "window close: deferred quit timer fired",
+                );
+                match slint::quit_event_loop() {
+                    Ok(()) => trace_settings(
+                        &quit_paths,
+                        "window close: deferred Slint event-loop quit scheduled",
+                    ),
+                    Err(error) => trace_settings(
+                        &quit_paths,
+                        &format!("window close: deferred event-loop quit failed: {error}"),
+                    ),
+                }
+            },
+        );
+        trace_settings(
+            &close_paths,
+            "window close: deferred quit timer armed; keeping native window until event-loop exit",
+        );
+        slint::CloseRequestResponse::KeepWindowShown
     });
 
     let weak = ui.as_weak();
@@ -1191,6 +1192,7 @@ fn run() -> Result<(), String> {
     let run_result = ui.run().map_err(|error| error.to_string());
     trace_settings(&paths, "UI event loop: returned");
     ui_closing.store(true, Ordering::Release);
+    close_quit_timer.stop();
     trace_settings(
         &paths,
         "worker shutdown: sending shutdown and joining I/O thread",
