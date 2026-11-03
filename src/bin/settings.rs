@@ -7,13 +7,13 @@ use slint::{
     VecModel,
 };
 use std::cell::RefCell;
-#[cfg(target_os = "linux")]
-use std::path::PathBuf;
 #[cfg(windows)]
 use std::fs::OpenOptions;
 #[cfg(windows)]
 use std::io::Write;
 use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
 use std::sync::{
@@ -1390,7 +1390,8 @@ mod tests {
 
     #[test]
     fn kde_accent_falls_back_to_last_used_custom_color() {
-        let contents = "[General]\nAccentColor=999,58,154\nLastUsedCustomAccentColor=10,20,30,128\n";
+        let contents =
+            "[General]\nAccentColor=999,58,154\nLastUsedCustomAccentColor=10,20,30,128\n";
         assert_eq!(parse_kde_accent(contents), Some([10, 20, 30, 128]));
     }
 
