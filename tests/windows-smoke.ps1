@@ -85,8 +85,8 @@ try {
     }
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($StartMenuShortcut)
-    if ($shortcut.TargetPath -ne $Bin -or $shortcut.Arguments -ne "--config") {
-        throw "Start Menu shortcut does not target the installed Rust Settings launcher."
+    if ($shortcut.TargetPath -ne $Settings -or $shortcut.Arguments -ne "") {
+        throw "Start Menu shortcut does not target the native Settings executable."
     }
 
     Write-Host "[2/9] real monitor discovery and opt-in autostart registry control"
