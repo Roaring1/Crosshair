@@ -1201,6 +1201,8 @@ unsafe extern "system" fn tray_window_proc(
 /// from the crosshair overlay and Settings processes. Left-click toggles the
 /// overlay; the context menu exposes Settings, Toggle, and Exit tray.
 pub fn run_tray() -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
     // The packaged CLI is also used by command-line users. Detach this
     // long-running tray controller from an Explorer-created console window.
     unsafe { FreeConsole() };
