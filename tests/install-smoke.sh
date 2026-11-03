@@ -23,18 +23,35 @@ export XDG_DATA_HOME="$ROOT/data"
 export XDG_STATE_HOME="$ROOT/state"
 export XDG_RUNTIME_DIR="$ROOT/runtime"
 export XDG_BIN_HOME="$ROOT/bin with space % and \$cash"
+
+echo "[0] CLI help and version work without creating user directories"
+HELP_ROOT="$ROOT/help"
+HELP_OUTPUT="$(env HOME="$HELP_ROOT/home" XDG_CONFIG_HOME="$HELP_ROOT/config" XDG_DATA_HOME="$HELP_ROOT/data" XDG_STATE_HOME="$HELP_ROOT/state" XDG_RUNTIME_DIR="$HELP_ROOT/runtime" "$BIN" --help)"
+grep -Fq "USAGE:" <<<"$HELP_OUTPUT"
+grep -Fq -- "--toggle" <<<"$HELP_OUTPUT"
+SHORT_HELP_OUTPUT="$(env HOME="$HELP_ROOT/home" XDG_CONFIG_HOME="$HELP_ROOT/config" XDG_DATA_HOME="$HELP_ROOT/data" XDG_STATE_HOME="$HELP_ROOT/state" XDG_RUNTIME_DIR="$HELP_ROOT/runtime" "$BIN" -h)"
+grep -Fq "USAGE:" <<<"$SHORT_HELP_OUTPUT"
+VERSION_OUTPUT="$(env HOME="$HELP_ROOT/home" XDG_CONFIG_HOME="$HELP_ROOT/config" XDG_DATA_HOME="$HELP_ROOT/data" XDG_STATE_HOME="$HELP_ROOT/state" XDG_RUNTIME_DIR="$HELP_ROOT/runtime" "$BIN" --version)"
+test "$VERSION_OUTPUT" = "Crosshair 4.0.0"
+test ! -e "$HELP_ROOT"
+echo "PASS: --help, -h and --version are filesystem-free"
+
 mkdir -p "$HOME" "$XDG_CONFIG_HOME/crosshair" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 
 CONFIG="$XDG_CONFIG_HOME/crosshair/config.json"
 AUTOSTART="$XDG_CONFIG_HOME/autostart/crosshair.desktop"
 APP_ENTRY="$XDG_DATA_HOME/applications/crosshair.desktop"
+APP_ICON="$XDG_DATA_HOME/icons/hicolor/scalable/apps/crosshair.svg"
 printf '%s\n' '{"sentinel":"retain-me"}' > "$CONFIG"
 
 echo "[1] explicit autostart installation"
 "$BIN" --autostart
 test -f "$AUTOSTART"
 test -f "$APP_ENTRY"
+test -f "$APP_ICON"
+grep -Fq "Icon=crosshair" "$APP_ENTRY"
+cmp -s "$APP_ICON" "$REPO_ROOT/crosshair.svg"
 python3 - <<'PY'
 import os
 import pathlib
@@ -73,6 +90,8 @@ test -f "$AUTOSTART"
 "$BIN" --install
 test ! -e "$AUTOSTART"
 test -f "$APP_ENTRY"
+test -f "$APP_ICON"
+grep -Fq "Icon=crosshair" "$APP_ENTRY"
 
 echo "[4] refuse symlinked autostart and abort normal install before partial writes"
 printf '%s\n' "outside-preserve" > "$ROOT/outside.desktop"
@@ -115,6 +134,7 @@ echo "[6] uninstall preflights every target before removing any"
 test -f "$AUTOSTART"
 test -f "$XDG_BIN_HOME/crosshair"
 test -f "$XDG_BIN_HOME/crosshair-settings"
+test -f "$APP_ICON"
 rm "$APP_ENTRY"
 ln -s "$ROOT/outside.desktop" "$APP_ENTRY"
 if "$BIN" --uninstall >/dev/null 2>&1; then
@@ -124,9 +144,24 @@ fi
 test -f "$XDG_BIN_HOME/crosshair"
 test -f "$XDG_BIN_HOME/crosshair-settings"
 test -f "$AUTOSTART"
+test -f "$APP_ICON"
 test -L "$APP_ENTRY"
 test "$(cat "$ROOT/outside.desktop")" = "outside-preserve"
 rm "$APP_ENTRY"
+
+echo "[6] uninstall refuses a symlinked icon before removing any other artifact"
+mv "$APP_ICON" "$ROOT/original-crosshair.svg"
+ln -s "$ROOT/outside.desktop" "$APP_ICON"
+if "$BIN" --uninstall >/dev/null 2>&1; then
+    echo "Uninstall unexpectedly accepted a symlinked app icon." >&2
+    exit 1
+fi
+test -f "$XDG_BIN_HOME/crosshair"
+test -f "$XDG_BIN_HOME/crosshair-settings"
+test -f "$AUTOSTART"
+test -L "$APP_ICON"
+rm "$APP_ICON"
+mv "$ROOT/original-crosshair.svg" "$APP_ICON"
 
 echo "[7] uninstall removes application files but retains config"
 "$BIN" --uninstall
@@ -134,6 +169,7 @@ test ! -e "$AUTOSTART"
 test ! -e "$XDG_BIN_HOME/crosshair"
 test ! -e "$XDG_BIN_HOME/crosshair-settings"
 test ! -e "$APP_ENTRY"
+test ! -e "$APP_ICON"
 test "$(cat "$CONFIG")" = '{"sentinel":"retain-me"}'
 
 echo "PASS: isolated install/autostart/uninstall lifecycle; config retained and uninstall preflighted"

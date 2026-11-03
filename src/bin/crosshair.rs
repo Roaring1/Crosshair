@@ -292,6 +292,19 @@ fn applications_entry_path() -> Result<PathBuf, String> {
 }
 
 #[cfg(target_os = "linux")]
+fn application_icon_path() -> Result<PathBuf, String> {
+    let app_entry = applications_entry_path()?;
+    let data_home = app_entry
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| "Could not resolve the XDG data directory for the app icon".to_string())?;
+    Ok(data_home.join("icons/hicolor/scalable/apps/crosshair.svg"))
+}
+
+#[cfg(target_os = "linux")]
+const APPLICATION_ICON_SVG: &[u8] = include_bytes!("../../crosshair.svg");
+
+#[cfg(target_os = "linux")]
 fn read_install_source(path: &Path) -> Result<Vec<u8>, String> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
@@ -423,12 +436,13 @@ fn install() -> Result<(), String> {
         let current_bytes = read_install_source(&current)?;
         let settings_bytes = read_install_source(&settings)?;
         let app_entry = applications_entry_path()?;
+        let app_icon = application_icon_path()?;
         let app_exec = desktop_entry_exec(&target_cli, "--config")?;
         let desktop = format!(
-            "[Desktop Entry]\nType=Application\nName=Crosshair\nComment=Configure the Crosshair overlay\nExec={app_exec}\nTerminal=false\nCategories=Utility;\nStartupWMClass=crosshair\n"
+            "[Desktop Entry]\nType=Application\nName=Crosshair\nComment=Configure the Crosshair overlay\nIcon=crosshair\nExec={app_exec}\nTerminal=false\nCategories=Utility;\nStartupWMClass=crosshair\n"
         );
 
-        validate_user_file_targets(&[&target_cli, &target_settings, &app_entry])
+        validate_user_file_targets(&[&target_cli, &target_settings, &app_entry, &app_icon])
             .map_err(|error| format!("Install destinations are not safe: {error}"))?;
         // Only disable a previous explicit login startup after every install
         // destination has passed preflight and before replacing any artifact.
@@ -439,6 +453,8 @@ fn install() -> Result<(), String> {
             .map_err(|error| format!("Could not install Settings: {error}"))?;
         atomic_write_user_file(&app_entry, desktop.as_bytes())
             .map_err(|error| format!("Could not create app-menu entry: {error}"))?;
+        atomic_write_user_file(&app_icon, APPLICATION_ICON_SVG)
+            .map_err(|error| format!("Could not install the application icon: {error}"))?;
     }
 
     #[cfg(target_os = "windows")]
@@ -469,7 +485,8 @@ fn uninstall() -> Result<(), String> {
         let settings = bin_dir.join("crosshair-settings");
         let autostart = autostart_entry_path()?;
         let app_entry = applications_entry_path()?;
-        remove_user_files(&[&cli, &settings, &autostart, &app_entry])
+        let app_icon = application_icon_path()?;
+        remove_user_files(&[&cli, &settings, &autostart, &app_entry, &app_icon])
             .map_err(|error| format!("Could not safely uninstall Crosshair: {error}"))?;
     }
 
@@ -526,14 +543,56 @@ fn uninstall() -> Result<(), String> {
     }
 }
 
+fn print_help() {
+    let help = format!(
+        r#"Crosshair {APP_VERSION} — native crosshair overlay
+
+USAGE:
+    crosshair [COMMAND]
+
+Run without a command to open Settings.
+
+COMMANDS:
+    --config                Open Settings
+    --toggle                Show if stopped; otherwise toggle visibility
+    --show                  Show the overlay
+    --hide                  Hide the overlay
+    --set <JSON>            Validate and persist a partial config update
+    --reload                Reload config.json from disk
+    --restart               Restart the overlay daemon
+    --quit                  Stop the overlay daemon
+    --status                Show daemon and overlay status
+    --doctor                Show platform and session diagnostics
+    --list-monitors         Print monitor descriptors as JSON
+    --export-code           Print the current shareable profile code
+    --import-code <CODE>    Import a profile code
+    --open-config-folder    Open the user configuration folder
+    --install               Install the native binaries and app-menu entry
+    --autostart             Enable optional login startup
+    --remove-autostart      Disable login startup
+    --uninstall             Remove installed binaries and launchers; keep config
+    --version, -V           Print the application version
+    --help, -h              Show this help
+"#
+    );
+    print!("{help}");
+}
+
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let paths = AppPaths::discover().map_err(|error| error.to_string())?;
 
+    // Help and version are intentionally filesystem-free. They must work even
+    // before the user has created a config directory or installed the app.
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_help();
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("Crosshair {APP_VERSION}");
         return Ok(());
     }
+
+    let paths = AppPaths::discover().map_err(|error| error.to_string())?;
     if args.is_empty() || args.iter().any(|a| a == "--config") {
         return launch_settings();
     }

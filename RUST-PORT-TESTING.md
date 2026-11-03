@@ -80,3 +80,19 @@ The workflow uploads the directory as the
 `crosshair-rust-settings-ui` artifact for 14 days. The test isolates HOME and
 all XDG paths, creates and shuts down only its own overlay process, and never
 interacts with the logged-in desktop.
+
+## Installer and command-surface regressions
+
+The Linux install smoke also verifies that `crosshair --help`, `crosshair -h`,
+and `crosshair --version` work before any HOME/XDG config directories exist.
+It checks that the native installer deploys the embedded SVG into the user's
+hicolor icon directory, references it from the desktop entry, rejects a
+symlink at the icon destination before changing any other install artifact,
+and removes the icon during uninstall while retaining configuration.
+
+The Windows smoke runs every CLI command through a bounded process wrapper
+that captures stdout/stderr and kills only a timed-out test process. It writes
+per-command stage diagnostics to `RUNNER_TEMP`; the workflow uploads those
+logs even when the integration step fails or reaches its timeout. This makes
+named-pipe or deferred-uninstall stalls diagnosable instead of leaving the
+Windows job indefinitely opaque.

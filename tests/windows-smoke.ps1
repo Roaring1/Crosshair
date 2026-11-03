@@ -14,7 +14,8 @@ foreach ($path in @($SourceCli, $SourceSettings, $InstallScript, $UninstallScrip
 
 $RunId = [guid]::NewGuid().ToString("N")
 $Root = Join-Path $env:TEMP ("crosshair-windows-smoke-" + $RunId)
-$DiagnosticLog = Join-Path $env:TEMP ("crosshair-windows-smoke-" + $RunId + ".log")
+$LogDirectory = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { $env:TEMP } else { $env:RUNNER_TEMP }
+$DiagnosticLog = Join-Path $LogDirectory ("crosshair-windows-smoke-" + $RunId + ".log")
 $env:APPDATA = Join-Path $Root "roaming"
 $env:LOCALAPPDATA = Join-Path $Root "local"
 $Package = Join-Path $Root "package"
@@ -43,17 +44,46 @@ function Write-SmokeLog {
 Write-SmokeLog "Starting Windows installer/overlay/Settings/uninstall smoke test."
 
 function Invoke-Crosshair {
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]] $Arguments)
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)][string[]] $Arguments,
+        [int] $TimeoutMilliseconds = 10000
+    )
     $label = "crosshair " + ($Arguments -join " ")
     Write-SmokeLog ("CLI START: " + $label)
-    $output = & $Bin @Arguments 2>&1
-    $exitCode = $LASTEXITCODE
-    $text = ($output | ForEach-Object { "$_" }) -join [Environment]::NewLine
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $Bin
+    $startInfo.WorkingDirectory = $InstallDir
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($argument in $Arguments) {
+        $startInfo.ArgumentList.Add($argument)
+    }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) {
+        throw ("Could not start " + $label)
+    }
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+        try { $process.Kill($true) } catch {}
+        try { $process.WaitForExit(2000) | Out-Null } catch {}
+        Write-SmokeLog ("CLI TIMEOUT: " + $label + " exceeded " + $TimeoutMilliseconds + " ms; process was terminated.")
+        throw ($label + " timed out after " + $TimeoutMilliseconds + " ms.")
+    }
+    $process.WaitForExit()
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
+    $exitCode = $process.ExitCode
+    $process.Dispose()
+    $text = ($stdout + $stderr).Trim()
     Write-SmokeLog ("CLI EXIT: " + $label + " (exit " + $exitCode + ")")
     if ($exitCode -ne 0) {
         throw ($label + " failed (" + $exitCode + "): " + $text)
     }
-    return $text
+    return $stdout
 }
 
 function Wait-ForStatus {
