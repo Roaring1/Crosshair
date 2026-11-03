@@ -819,6 +819,19 @@ fn enqueue_cli(
 }
 
 fn run() -> Result<(), String> {
+    // On Windows, the Winit backend normally keeps a hidden native HWND alive
+    // when a Slint component is hidden. Settings is a one-window, one-shot
+    // process, so its close path must destroy that HWND before requesting the
+    // event loop to exit. Set this before creating the UI or starting the I/O
+    // worker; Slint reads it when Window::hide() is called.
+    #[cfg(windows)]
+    // SAFETY: `run` is entered before any application worker threads or the
+    // Slint event loop are started, so no other thread can concurrently access
+    // the process environment while this setting is installed.
+    unsafe {
+        std::env::set_var("SLINT_DESTROY_WINDOW_ON_HIDE", "1");
+    }
+
     let paths = AppPaths::discover().map_err(|error| error.to_string())?;
     trace_settings(&paths, "startup: application paths discovered");
     let mut initial = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
