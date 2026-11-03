@@ -69,8 +69,8 @@ foreach ($file in @("Install-Crosshair.ps1", "Uninstall-Crosshair.ps1", "README-
 
 $shell = New-Object -ComObject WScript.Shell
 $link = $shell.CreateShortcut($Shortcut)
-$link.TargetPath = $InstalledCli
-$link.Arguments = "--config"
+$link.TargetPath = $InstalledSettings
+$link.Arguments = ""
 $link.WorkingDirectory = $InstallDir
 $link.Description = "Configure the Crosshair overlay"
 $link.IconLocation = "$InstalledCli,0"
