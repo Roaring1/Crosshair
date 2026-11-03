@@ -124,7 +124,7 @@ try {
     $runValue = (Get-ItemProperty -LiteralPath $RunKey -Name "Crosshair").Crosshair
     # Rust PathBuf and PowerShell Join-Path can render the same Windows path with different separators.
     $normalizedRun = $runValue.Replace("/", "\")
-    $normalizedBin = $Bin.Replace("/", "\\")
+    $normalizedBin = $Bin.Replace("/", "\")
     $autostartPathMatches = $normalizedRun.IndexOf($normalizedBin, [StringComparison]::OrdinalIgnoreCase) -ge 0
     if (-not $autostartPathMatches -or
         $normalizedRun -notmatch "--daemon" -or
