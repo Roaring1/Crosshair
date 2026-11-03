@@ -108,8 +108,14 @@ fn launch_settings() -> Result<(), String> {
 
 fn spawn_daemon() -> Result<(), String> {
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-    Command::new(executable)
-        .arg("--daemon")
+    let mut command = Command::new(executable);
+    command.arg("--daemon");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
