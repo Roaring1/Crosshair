@@ -60,3 +60,23 @@ xvfb-run -a -s "-screen 0 1280x900x24" bash tests/settings-screenshots.sh
 The script uses temporary HOME/XDG directories and shuts down its own overlay
 and Settings processes on exit. It does not attach to or change the active
 desktop session.
+
+
+### Visual capture coverage
+
+`tests/settings-screenshots.sh` records seven screenshots into
+`artifacts/settings-ui/` under a private Xvfb display:
+
+1. General tab.
+2. Appearance tab at the top.
+3. Open 24-color palette.
+4. Selected preset (`#0ea5e9`) with a config-persistence assertion.
+5. Appearance with Outline expanded.
+6. The lower Appearance controls after wheel scrolling, with a movement
+   assertion against the expanded-top capture.
+7. Appearance returned to the top.
+
+The workflow uploads the directory as the
+`crosshair-rust-settings-ui` artifact for 14 days. The test isolates HOME and
+all XDG paths, creates and shuts down only its own overlay process, and never
+interacts with the logged-in desktop.
