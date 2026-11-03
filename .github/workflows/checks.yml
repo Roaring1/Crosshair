@@ -136,7 +136,7 @@ jobs:
         run: xvfb-run -a bash tests/x11-smoke.sh
 
       - name: Test Settings autostart buttons and independent overlay lifetime
-        run: xvfb-run -a bash tests/settings-autostart-smoke.sh
+        run: xvfb-run -a -s "-screen 0 1280x900x24" bash tests/settings-autostart-smoke.sh
 
       - name: Test Settings responsiveness during delayed IPC
         run: bash tests/settings-async-io-smoke.sh
