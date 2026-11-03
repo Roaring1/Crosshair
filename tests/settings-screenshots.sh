@@ -82,19 +82,19 @@ capture() {
     echo "$name.png $dimensions $(stat -c '%s bytes' "$OUT/$name.png")" | tee -a "$OUT/manifest.txt"
 }
 
-echo "[1/5] Capture General"
+echo "[1/7] Capture General"
 capture "01-general"
 
-echo "[2/5] Open Appearance"
+echo "[2/7] Open Appearance"
 click_at 315 24
 capture "02-appearance-top"
 
-echo "[3/6] Open the main color palette"
+echo "[3/7] Open the main color palette"
 # Main color swatch: left pane, Color row.
 click_at 122 265
 capture "03-color-picker"
 
-echo "[4/6] Select a preset and verify that it persists"
+echo "[4/7] Select a preset and verify that it persists"
 # Row 2, column 4 of the palette is #0ea5e9.
 click_at 204 353
 sleep 0.8
