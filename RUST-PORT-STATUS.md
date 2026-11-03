@@ -1,5 +1,36 @@
 # Native Rust port status
 
+## Latest checkpoint — 2026-11-03
+
+The current source checkpoint is 9ce53cfab1c4a4cb3f5c1f7a88318a2d946d3aed (desktop accent integration), on top of e8dabff5890a90e984818bb6c0860bf01dee7e29 (Windows Settings close fix). These commits are intended for the existing draft PR #3.
+
+### Windows 11 laptop validation
+
+- Hosted Actions run #181 (https://github.com/Roaring1/Crosshair/actions/runs/41722012664) completed green for the Windows optimized build/native tests/full installer-overlay-named-pipe-Settings-close-uninstall smoke, Linux Rust job/Settings screenshots, Python 3.10–3.14 matrix, and dependency audit. It validates the e8dabff shutdown-fix checkpoint; the newer accent commit still needs its own CI run.
+- The run #181 Windows ZIP was SHA-256 verified on Nobara and again after transfer to RoaringsLaptop (792165c27c973016245bafe6986c4b376661e63a10a8c62f937c655eb9b22528). It was installed over the earlier test build using the normal per-user installer. The installer preserved the generated test configuration, did not add login autostart, and did not remove Python files.
+- On the actual Windows 11 desktop (Session 1), Settings was opened from the installed executable and its visible Crosshair Settings HWND received WM_CLOSE. The test harness supplied no SLINT_DESTROY_WINDOW_ON_HIDE override; the installed Settings binary set it process-locally at startup. The process exited naturally with code 0 in under three seconds; the application trace records UI event loop returned, the I/O worker receiving shutdown, and the worker thread joining. The overlay remained disabled and no daemon remained.
+- A separate real-session overlay smoke using the preceding run #180 4.0.0 install on the laptop observed a visible 17×17 overlay window on the active 1920×1080 logical display with WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_EX_TOPMOST, and WS_EX_NOACTIVATE; --hide exited the daemon. This verifies the actual HWND styles and clean hide, not fullscreen-game behavior.
+- The laptop currently exposes one active logical display (\\.\DISPLAY5, 1920×1080). WMI reports a 2560×1440 native panel and another inactive PnP display device, but there is only one active output for testing. Multi-monitor/hotplug and fractional-DPI behavior therefore remain unverified. No fullscreen game test has been performed.
+- The Windows test configuration is enabled=false, auto_save=true; its SHA-256 is 1F61272337DE3F4FEFF56B7B3FA41CE4A2A2155BD925EBC1ABA6FFCF6C0AB90B. Login autostart remains absent. There was no pre-existing Crosshair Windows configuration or installation before these tests.
+
+### Desktop accent integration
+
+- Slint 1.18.1 already queries Windows' DWM system colorization accent and applies it to the standard widget palette. The laptop's current Windows DWM accent values resolve to #e90082; no second Windows-specific registry reader is added.
+- KDE's XDG portal accent on Nobara reports the selection color (#ad3376), while Hearth reads Plasma's selected [General] AccentColor=233,58,154 (#e93a9a). Crosshair now reads AccentColor from the active KDE config home, falls back to LastUsedCustomAccentColor, and updates Slint's shared palette. A two-second UI timer reapplies the selected Plasma accent after portal updates and follows changes while Settings remains open. Standard Slint controls inherit the palette; the crosshair overlay's actual configured color is untouched.
+- The KDE Settings path was exercised under a private Xvfb display using a copy of the real kdeglobals, with KDE session markers enabled. After the portal watcher and override timer had time to run, the captured Settings screen contained the expected saturated pink/magenta accent on the controls. The user's active desktop and real config were not changed.
+- Four parser regression tests cover AccentColor precedence, LastUsedCustomAccentColor fallback, section isolation, and malformed/out-of-range values. The latest local cargo check --locked --features settings-ui --all-targets passed, and all 56 Rust tests passed (32 core, 18 Linux backend, 6 Settings).
+- This uses the Slint 1.18.1 internal i-slint-core context setter because Slint 1.18.1 exposes no public accent override API. Both slint and i-slint-core are pinned to exactly 1.18.1 so the setter cannot accidentally target a second/different context after an ordinary compatible-version update. Review this integration when upgrading Slint. The new accent commit still requires hosted Linux/Windows CI and a Windows package rebuild.
+
+### Remaining acceptance gates
+
+- Run hosted CI on 9ce53cf and install the resulting package on Windows to validate the final exact source head.
+- Test mixed/fractional DPI, multi-monitor attach/detach, and fullscreen-game behavior on real hardware; the Windows laptop currently has only one active display.
+- Perform a deliberate visual/click-through/fullscreen validation on the active KDE Wayland desktop; private Xvfb and KWin compositor tests do not replace this.
+- Decide whether the known system-tray parity gap is acceptable before closing PR #3.
+
+Keep PR #3 in draft until these gates are complete.
+
+
 _Last reviewed: 2026-11-03_
 
 
