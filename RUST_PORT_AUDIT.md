@@ -263,3 +263,29 @@ Appearance controls with ImageMagick under Xvfb, then uploads
 they do not claim to validate KDE Wayland placement, real multi-monitor
 behavior, or fullscreen-game visibility. The new screenshot path must pass in
 CI before the UI visual gate is considered verified.
+
+
+### Local Xvfb visual verification
+
+The Linux development checkout was rebuilt successfully with the updated Slint
+UI. The isolated screenshot run produced seven 1280x900 captures: General,
+Appearance at the top, the open 24-swatch palette, the selected-color state,
+expanded Outline controls, the scrolled lower pane, and the restored top
+position. The test selects `#0ea5e9`, asserts that the color appears in the
+temporary config, expands Outline to create real overflow, and asserts that
+the scrolled capture differs from the expanded-top capture. The actual captures
+were inspected: the selected color updates both the HEX field and preview, and
+the lower content moves inside the left pane.
+
+The scroll viewport is sized from the window height after subtracting the
+navigation/divider and the optional profile panel. This avoids a 100%-of-window
+child extending underneath the header and being clipped by the outer window.
+The local Linux Rust test suite passed 52 tests and the Settings binaries
+compiled. The screenshot harness itself passed under Xvfb. The local checkout
+does not have the Rust formatting component or MSVC target installed, so those
+two local checks were not available; the Windows backend work in the local
+working tree remains uncommitted and is not represented as CI-verified here.
+
+The CI artifact remains the final cross-environment verification gate; the
+local Xvfb run does not claim to validate KDE Wayland sizing or native Windows
+rendering.
