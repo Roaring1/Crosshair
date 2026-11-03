@@ -396,7 +396,11 @@ fn desktop_entry_exec(path: &Path, arguments: &str) -> Result<String, String> {
         .replace('`', "\\`")
         .replace('$', "\\$")
         .replace('%', "%%");
-    Ok(format!("\"{escaped}\" {arguments}"))
+    if arguments.trim().is_empty() {
+        Ok(format!("\"{escaped}\""))
+    } else {
+        Ok(format!("\"{escaped}\" {arguments}"))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -454,9 +458,9 @@ fn install() -> Result<(), String> {
         let settings_bytes = read_install_source(&settings)?;
         let app_entry = applications_entry_path()?;
         let app_icon = application_icon_path()?;
-        let app_exec = desktop_entry_exec(&target_cli, "--config")?;
+        let app_exec = desktop_entry_exec(&target_cli, "")?;
         let desktop = format!(
-            "[Desktop Entry]\nType=Application\nName=Crosshair\nComment=Configure the Crosshair overlay\nIcon=crosshair\nExec={app_exec}\nTerminal=false\nCategories=Utility;\nStartupWMClass=crosshair\n"
+            "[Desktop Entry]\nType=Application\nName=Crosshair\nComment=Crosshair overlay and Settings\nIcon=crosshair\nExec={app_exec}\nTerminal=false\nCategories=Utility;\nStartupWMClass=crosshair\n"
         );
 
         validate_user_file_targets(&[&target_cli, &target_settings, &app_entry, &app_icon])
@@ -478,15 +482,27 @@ fn install() -> Result<(), String> {
     {
         std::fs::create_dir_all(&bin_dir)
             .map_err(|error| format!("Could not create {}: {error}", bin_dir.display()))?;
+        let source_icon = current
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("crosshair.ico");
+        if !source_icon.is_file() {
+            return Err(format!(
+                "The Crosshair icon is missing: {}",
+                source_icon.display()
+            ));
+        }
         std::fs::copy(&current, &target_cli)
             .map_err(|error| format!("Could not install CLI: {error}"))?;
         std::fs::copy(&settings, &target_settings)
             .map_err(|error| format!("Could not install Settings: {error}"))?;
+        std::fs::copy(&source_icon, bin_dir.join("crosshair.ico"))
+            .map_err(|error| format!("Could not install the Crosshair icon: {error}"))?;
     }
 
     println!("Crosshair installed to {}.", bin_dir.display());
     println!(
-        "No autostart or system-tray process was installed. Settings and overlay are started on demand."
+        "No login autostart or resident tray process was started. The selected launch mode is used when Crosshair is opened."
     );
     Ok(())
 }
@@ -567,10 +583,14 @@ fn print_help() {
 USAGE:
     crosshair [COMMAND]
 
-Run without a command to open Settings.
+Run without a command to use the saved App Activity preference:
+    App UI, System tray (Windows), or Command only.
+
+Explicit commands remain available in every mode.
 
 COMMANDS:
-    --config                Open Settings
+    --config                Open Settings, regardless of the launch preference
+    --tray                  Start the Windows system tray controller
     --toggle                Show if stopped; otherwise toggle visibility
     --show                  Show the overlay
     --hide                  Hide the overlay
@@ -610,8 +630,38 @@ fn run() -> Result<(), String> {
     }
 
     let paths = AppPaths::discover().map_err(|error| error.to_string())?;
-    if args.is_empty() || args.iter().any(|a| a == "--config") {
+    if args.is_empty() {
+        let config = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
+        match config.activity_mode.as_str() {
+            "command" => return Ok(()),
+            "tray" => {
+                #[cfg(windows)]
+                {
+                    return crosshair_core::windows::run_tray();
+                }
+                #[cfg(not(windows))]
+                {
+                    eprintln!(
+                        "System tray mode is only available on Windows; opening Settings instead."
+                    );
+                    return launch_settings();
+                }
+            }
+            _ => return launch_settings(),
+        }
+    }
+    if args.iter().any(|a| a == "--config") {
         return launch_settings();
+    }
+    if args.iter().any(|a| a == "--tray") {
+        #[cfg(windows)]
+        {
+            return crosshair_core::windows::run_tray();
+        }
+        #[cfg(not(windows))]
+        {
+            return Err("System tray mode is only available on Windows.".into());
+        }
     }
     if args.iter().any(|a| a == "--export-code") {
         let config = Config::load(&paths.config_file).map_err(|error| error.to_string())?;

@@ -15,7 +15,7 @@ Native Rust crosshair overlay for Linux and Windows.
 
 The overlay is designed to remain topmost, non-activating and click-through. Settings is a separate Slint application and can close without necessarily closing an enabled overlay.
 
-Known parity gaps are called out rather than hidden: the Rust branch does not claim system-tray parity or a global hotkey service. KDE/Wayland users can bind the CLI command `crosshair --toggle` to a compositor shortcut.
+The Windows build includes a native notification-area controller. Linux/Wayland intentionally uses the app UI or explicit CLI commands rather than claiming a portable system tray. No global hotkey service is claimed; KDE/Wayland users can bind `crosshair --toggle` to a compositor shortcut.
 
 ## Features
 
@@ -23,6 +23,7 @@ Known parity gaps are called out rather than hidden: the Rust branch does not cl
 - Adjustable size, gap, thickness, color, opacity, outline, shadow and reference dot.
 - Monitor selection: all, primary, index and connector name; active/cursor-based selection is supported by the Windows path.
 - Live Settings preview, saved profiles and bounded configuration validation.
+- App Activity launch preference: App UI, System tray (Windows), or Command only. Explicit Settings and CLI actions remain available in every mode.
 - On-demand daemon: no overlay process is required while hidden. Login autostart is an explicit opt-in.
 - Local newline-framed IPC on Linux and a per-user local named pipe on Windows.
 - Atomic configuration writes and config retention when the application is uninstalled.

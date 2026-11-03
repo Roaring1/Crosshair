@@ -2,6 +2,18 @@
 
 ## Latest checkpoint — 2026-11-03
 
+### App Activity launch preferences — local implementation complete; hosted CI pending
+
+- Added one persisted **App Activity** preference. It controls only what a plain application launch does; it does not disable or hide features. The values are **App UI**, **System tray** (Windows only), and **Command only**.
+- Activity and auto-save are now treated as Settings metadata, not overlay settings. Changing only these values saves the config without sending an overlay preview or waking the overlay daemon. A forced initial sync still starts the overlay when the saved overlay is enabled; changes to visual/monitor/enabled fields continue through the existing overlay worker.
+- In App UI mode, a plain launch opens Settings. In System tray mode, a plain launch starts the independent Windows tray controller. In Command only mode, a plain launch exits quietly. Explicit `--config`, `--tray`, `--toggle`, `--show`, `--hide`, `--status` and other CLI commands remain separately available.
+- Windows tray: native `Shell_NotifyIconW` implementation, project-logo `.ico` derived from the existing SVG, left-click toggles the overlay, and its context menu offers Show app UI, Toggle crosshair and Exit tray. When the saved Enabled setting is true, tray startup calls idempotent `--show` so a cold launch starts/reveals the overlay; when false, it starts tray only. The tray and overlay have independent lifetimes.
+- The Windows Start Menu has a mode-aware **Crosshair** entry and a separate unconditional **Crosshair Settings** entry. The mode-aware entry uses the existing GUI-subsystem Settings executable as a no-console launcher, so choosing Command only stays quiet and choosing System tray does not flash a console window. The tray can also open or foreground Settings.
+- The Windows installer/uninstaller now manage both shortcuts and the tray icon, and stop only matching installed tray/CLI processes when replacing or removing the app. Login autostart remains a separate, explicit choice and is not changed by App Activity.
+- Linux exposes App UI and Command only; the tray option is not shown there. `crosshair --toggle` remains the quick-toggle route. This avoids promising a native Wayland tray where desktop support is not consistent.
+- Local Linux verification after the metadata separation passed: 59 Rust tests (33 core, 18 Linux backend, 8 Settings), `cargo check --locked --features settings-ui --all-targets`, debug and optimized builds, debug/release install-autostart-uninstall smoke, and the eight-screen Xvfb Settings visual/close test, including command-only explicit UI access and changing the saved App Activity selection. No compiler warnings were reported. Hosted Windows compilation and the expanded tray/launcher smoke test remain the authoritative checks for the Win32 implementation. The user's real multi-monitor, DPI, pointer-pass-through and game tests remain reserved for the final release-acceptance pass.
+
+
 The tested executable-code checkpoint is `12083973ee15da0a1216f11b1b2d5231f73ee3c1`, containing the Windows Settings shutdown fix (`e8dabff`), desktop accent integration (`9ce53cf`), and rustfmt correction (`59e4ee8`). PR head `229e45099afbc56f205547513291f4b578667668` then updated this report only. Full CI run #184 on that head completed green. PR #3 remains draft.
 
 ### Hosted validation
@@ -37,7 +49,7 @@ The tested executable-code checkpoint is `12083973ee15da0a1216f11b1b2d5231f73ee3
 
 - Validate Windows mixed/fractional DPI, multiple active displays, display hotplug and fullscreen-game behavior; the laptop had only one active logical display in this test.
 - Validate pointer interaction/pass-through and fullscreen behavior during a deliberate live KDE desktop test. The brief real Wayland show/hide proves the saved output launches and hides, but it is not a pointer-passthrough or game-fullscreen acceptance test.
-- Decide whether the known system-tray parity gap is acceptable before closing PR #3. Keep the PR in draft until the remaining platform gates are completed.
+- Validate real Windows tray click/menu behavior and launcher handoff on the laptop; hosted CI covers the native controller, shortcut behavior and independent tray/overlay lifecycle. Keep the PR in draft until the remaining real-platform gates are completed.
 
 _Last reviewed: 2026-11-03_
 
@@ -134,7 +146,7 @@ The Rust version number is a package version, not evidence that a v4.0.0 release
 | Monitor targeting | All, primary, active, index and connector name | All/primary/index/name on both platform paths; cursor-active selection is supported on the native Windows path, while the Wayland backend explicitly fails closed where cursor-active output cannot be queried |
 | IPC / CLI | Local Unix socket and CLI control | Bounded newline-framed local IPC on Linux; per-user named-pipe IPC in the Windows implementation |
 | Install lifecycle | Linux install, optional autostart, uninstall and config retention | Linux install lifecycle smoke coverage; Windows per-user installer, Start Menu shortcut, opt-in Run-key autostart and uninstall preserving config are included in the draft |
-| System tray | AppIndicator / GTK status icon fallback | Not yet at parity; no Rust tray process is claimed |
+| System tray | AppIndicator / GTK status icon fallback | Native Win32 notification-area controller in the Rust build; Linux tray remains intentionally unimplemented |
 | Global hotkeys | Platform/compositor-dependent; KDE may bind CLI commands | No global hotkey service is claimed; Wayland users can bind the Rust CLI through compositor shortcuts |
 | Windows overlay | Not part of the Python GTK Linux implementation | Native Win32 layered-window backend and smoke test are now part of the draft branch; Windows CI is the first authoritative compile/runtime gate |
 | macOS | Not supported by the current baseline | Not implemented |

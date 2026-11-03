@@ -16,6 +16,7 @@ use std::io::{BufReader, Write};
 use std::mem::size_of;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,6 +37,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
     OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
 };
+use windows_sys::Win32::System::Console::FreeConsole;
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Pipes::{
@@ -53,14 +55,21 @@ use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     SetProcessDpiAwarenessContext,
 };
+use windows_sys::Win32::UI::Shell::{
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GetCursorPos, GetMessageW, HTTRANSPARENT, HWND_TOPMOST, MA_NOACTIVATE, MONITORINFOF_PRIMARY,
-    MSG, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, RegisterClassW, SW_SHOWNOACTIVATE,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow,
-    TranslateMessage, ULW_ALPHA, UnregisterClassW, UpdateLayeredWindow, WM_APP, WM_CLOSE,
-    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_QUIT, WNDCLASSW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    AppendMenuW, CS_HREDRAW, CS_VREDRAW, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+    DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW,
+    HTTRANSPARENT, HWND_TOPMOST, IDI_APPLICATION, IMAGE_ICON, LR_DEFAULTSIZE, LR_LOADFROMFILE,
+    LoadIconW, LoadImageW, MA_NOACTIVATE, MF_STRING, MONITORINFOF_PRIMARY, MSG, PM_NOREMOVE,
+    PeekMessageW, PostMessageW, PostQuitMessage, PostThreadMessageW, RegisterClassW,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetForegroundWindow,
+    SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
+    ULW_ALPHA, UnregisterClassW, UpdateLayeredWindow, WM_APP, WM_CLOSE, WM_DESTROY,
+    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_NULL,
+    WM_QUIT, WM_RBUTTONUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 #[link(name = "user32")]
@@ -1068,6 +1077,271 @@ pub fn send_command(
 
 fn crosshair_ipc_limit() -> usize {
     crate::MAX_IPC_MESSAGE_BYTES
+}
+
+const TRAY_WINDOW_CLASS: &str = "CrosshairRustTrayWindow";
+const WM_APP_TRAY_CALLBACK: u32 = WM_APP + 41;
+const TRAY_OPEN_SETTINGS: usize = 1;
+const TRAY_TOGGLE_CROSSHAIR: usize = 2;
+const TRAY_EXIT: usize = 3;
+
+fn launch_tray_action(argument: Option<&str>) {
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let mut command = Command::new(executable);
+    if let Some(argument) = argument {
+        command.arg(argument);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    let _ = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
+fn open_settings_from_tray() {
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let Some(parent) = executable.parent() else {
+        return;
+    };
+    let settings = parent.join("crosshair-settings.exe");
+    if !settings.is_file() {
+        return;
+    }
+    let mut command = Command::new(settings);
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    let _ = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
+fn show_tray_menu(hwnd: HWND) {
+    let menu = unsafe { CreatePopupMenu() };
+    if menu.is_null() {
+        return;
+    }
+    let open = wide("Show app UI");
+    let toggle = wide("Toggle crosshair");
+    let exit = wide("Exit tray");
+    unsafe {
+        AppendMenuW(menu, MF_STRING, TRAY_OPEN_SETTINGS, open.as_ptr());
+        AppendMenuW(menu, MF_STRING, TRAY_TOGGLE_CROSSHAIR, toggle.as_ptr());
+        AppendMenuW(menu, MF_STRING, TRAY_EXIT, exit.as_ptr());
+        let mut point = POINT::default();
+        GetCursorPos(&mut point);
+        SetForegroundWindow(hwnd);
+        let selected = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            point.x,
+            point.y,
+            0,
+            hwnd,
+            null(),
+        ) as usize;
+        let _ = PostMessageW(hwnd, WM_NULL, 0, 0);
+        DestroyMenu(menu);
+        match selected {
+            TRAY_OPEN_SETTINGS => open_settings_from_tray(),
+            TRAY_TOGGLE_CROSSHAIR => launch_tray_action(Some("--toggle")),
+            TRAY_EXIT => {
+                let _ = PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            }
+            _ => {}
+        }
+    }
+}
+
+unsafe extern "system" fn tray_window_proc(
+    hwnd: HWND,
+    message: u32,
+    _wparam: WPARAM,
+    lparam: LPARAM,
+) -> isize {
+    match message {
+        WM_APP_TRAY_CALLBACK => {
+            match lparam as u32 {
+                WM_LBUTTONUP => launch_tray_action(Some("--toggle")),
+                WM_RBUTTONUP => show_tray_menu(hwnd),
+                _ => {}
+            }
+            0
+        }
+        WM_CLOSE => {
+            unsafe { DestroyWindow(hwnd) };
+            0
+        }
+        WM_DESTROY => {
+            let mut data = NOTIFYICONDATAW::default();
+            data.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
+            data.hWnd = hwnd;
+            data.uID = 1;
+            unsafe {
+                Shell_NotifyIconW(NIM_DELETE, &data);
+                PostQuitMessage(0);
+            }
+            0
+        }
+        _ => unsafe { DefWindowProcW(hwnd, message, _wparam, lparam) },
+    }
+}
+
+/// Keep a small native Windows notification-area controller alive independently
+/// from the crosshair overlay and Settings processes. Left-click toggles the
+/// overlay; the context menu exposes Settings, Toggle, and Exit tray.
+pub fn run_tray() -> Result<(), String> {
+    // The packaged CLI is also used by command-line users. Detach this
+    // long-running tray controller from an Explorer-created console window.
+    unsafe { FreeConsole() };
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let paths = AppPaths::discover().map_err(|error| error.to_string())?;
+    let config = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
+    if config.enabled {
+        // A tray launch honors the saved overlay-enabled state as well as the
+        // tray preference. --show is idempotent: it starts a cold overlay or
+        // reveals an existing one without toggling an already-visible one off.
+        let show_result = Command::new(&executable)
+            .arg("--show")
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        match show_result {
+            Ok(status) if status.success() => {}
+            Ok(status) => trace(
+                &paths,
+                &format!("tray startup: --show returned {}", status),
+            ),
+            Err(error) => trace(
+                &paths,
+                &format!("tray startup: could not request --show: {error}"),
+            ),
+        }
+    }
+    let class_name = wide(TRAY_WINDOW_CLASS);
+    let title = wide("Crosshair Tray Controller");
+    let instance = unsafe { GetModuleHandleW(null()) };
+    if instance.is_null() {
+        return Err(last_error(
+            "Could not get the Crosshair module handle for the tray",
+        ));
+    }
+    if !unsafe { FindWindowW(class_name.as_ptr(), null()) }.is_null() {
+        return Ok(());
+    }
+    let class = WNDCLASSW {
+        style: 0,
+        lpfnWndProc: Some(tray_window_proc),
+        hInstance: instance,
+        lpszClassName: class_name.as_ptr(),
+        ..Default::default()
+    };
+    if unsafe { RegisterClassW(&class) } == 0 {
+        return Err(last_error(
+            "Could not register the Crosshair tray window class",
+        ));
+    }
+    let hwnd = unsafe {
+        CreateWindowExW(
+            0,
+            class_name.as_ptr(),
+            title.as_ptr(),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            null_mut(),
+            null_mut(),
+            instance,
+            null(),
+        )
+    };
+    if hwnd.is_null() {
+        unsafe { UnregisterClassW(class_name.as_ptr(), instance) };
+        return Err(last_error("Could not create the Crosshair tray controller"));
+    }
+
+    let mut data = NOTIFYICONDATAW::default();
+    data.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
+    data.hWnd = hwnd;
+    data.uID = 1;
+    data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    data.uCallbackMessage = WM_APP_TRAY_CALLBACK;
+    let icon_path = executable
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("crosshair.ico");
+    let icon_path_wide = wide(&icon_path.to_string_lossy());
+    let custom_icon = unsafe {
+        LoadImageW(
+            null_mut(),
+            icon_path_wide.as_ptr(),
+            IMAGE_ICON,
+            0,
+            0,
+            LR_LOADFROMFILE | LR_DEFAULTSIZE,
+        )
+    };
+    data.hIcon = if custom_icon.is_null() {
+        unsafe { LoadIconW(null_mut(), IDI_APPLICATION) }
+    } else {
+        custom_icon
+    };
+    let tooltip = wide("Crosshair - click to toggle");
+    let tooltip_len = tooltip.len().min(data.szTip.len() - 1);
+    data.szTip[..tooltip_len].copy_from_slice(&tooltip[..tooltip_len]);
+    if unsafe { Shell_NotifyIconW(NIM_ADD, &data) } == 0 {
+        unsafe {
+            DestroyWindow(hwnd);
+            if !custom_icon.is_null() {
+                windows_sys::Win32::UI::WindowsAndMessaging::DestroyIcon(custom_icon);
+            }
+            UnregisterClassW(class_name.as_ptr(), instance);
+        }
+        return Err(last_error(
+            "Could not add the Crosshair notification-area icon",
+        ));
+    }
+
+    let mut message = MSG::default();
+    loop {
+        let result = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
+        if result == 0 {
+            break;
+        }
+        if result == -1 {
+            unsafe {
+                DestroyWindow(hwnd);
+                if !custom_icon.is_null() {
+                    windows_sys::Win32::UI::WindowsAndMessaging::DestroyIcon(custom_icon);
+                }
+                UnregisterClassW(class_name.as_ptr(), instance);
+            }
+            return Err(last_error("The Crosshair tray message loop failed"));
+        }
+        unsafe {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    if !custom_icon.is_null() {
+        unsafe { windows_sys::Win32::UI::WindowsAndMessaging::DestroyIcon(custom_icon) };
+    }
+    unsafe { UnregisterClassW(class_name.as_ptr(), instance) };
+    Ok(())
 }
 
 pub fn run(config: Config, paths: AppPaths) -> Result<(), String> {

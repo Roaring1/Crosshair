@@ -3,10 +3,11 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $SourceCli = Join-Path $RepoRoot "target\release\crosshair.exe"
 $SourceSettings = Join-Path $RepoRoot "target\release\crosshair-settings.exe"
+$SourceIcon = Join-Path $RepoRoot "crosshair.ico"
 $InstallScript = Join-Path $RepoRoot "packaging\windows\Install-Crosshair.ps1"
 $UninstallScript = Join-Path $RepoRoot "packaging\windows\Uninstall-Crosshair.ps1"
 $Readme = Join-Path $RepoRoot "packaging\windows\README-WINDOWS.txt"
-foreach ($path in @($SourceCli, $SourceSettings, $InstallScript, $UninstallScript, $Readme)) {
+foreach ($path in @($SourceCli, $SourceSettings, $SourceIcon, $InstallScript, $UninstallScript, $Readme)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Windows smoke package input is missing: $path"
     }
@@ -20,7 +21,7 @@ $env:APPDATA = Join-Path $Root "roaming"
 $env:LOCALAPPDATA = Join-Path $Root "local"
 $Package = Join-Path $Root "package"
 New-Item -ItemType Directory -Force -Path $Package, $env:APPDATA, $env:LOCALAPPDATA | Out-Null
-Copy-Item -LiteralPath $SourceCli, $SourceSettings, $InstallScript, $UninstallScript, $Readme -Destination $Package
+Copy-Item -LiteralPath $SourceCli, $SourceSettings, $SourceIcon, $InstallScript, $UninstallScript, $Readme -Destination $Package
 
 # Simulate a prior release with an explicit login-startup preference.
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
@@ -30,7 +31,9 @@ Set-ItemProperty -LiteralPath $RunKey -Name "Crosshair" -Value ('"' + $SourceCli
 $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\Crosshair"
 $Bin = Join-Path $InstallDir "crosshair.exe"
 $Settings = Join-Path $InstallDir "crosshair-settings.exe"
+$InstalledIcon = Join-Path $InstallDir "crosshair.ico"
 $StartMenuShortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Crosshair.lnk"
+$SettingsShortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Crosshair Settings.lnk"
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $ConfigPath = Join-Path $env:APPDATA "Crosshair\config.json"
 
@@ -44,6 +47,8 @@ public static class CrosshairSmokeNative {
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
     [DllImport("user32.dll", EntryPoint = "PostMessageW", SetLastError = true)]
     public static extern bool PostMessage(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", EntryPoint = "FindWindowW", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr FindWindow(string className, string windowName);
     [DllImport("user32.dll", EntryPoint = "EnumWindows", SetLastError = true)]
     public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
     [DllImport("user32.dll", EntryPoint = "GetWindowThreadProcessId", SetLastError = true)]
@@ -250,12 +255,14 @@ function Stop-Crosshair {
         Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
+$trayProcess = $null
 try {
-    Write-SmokeLog "[1/9] install the same per-user package intended for the laptop"
+    Write-SmokeLog "[1/11] install the same per-user package intended for the laptop"
     & (Join-Path $Package "Install-Crosshair.ps1")
     if ($LASTEXITCODE -ne 0) { throw "Windows installer script failed." }
     if (-not (Test-Path -LiteralPath $Bin -PathType Leaf) -or
-        -not (Test-Path -LiteralPath $Settings -PathType Leaf)) {
+        -not (Test-Path -LiteralPath $Settings -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $InstalledIcon -PathType Leaf)) {
         throw "Installer did not deploy both native executables."
     }
     $version = Invoke-Crosshair -Arguments @("--version")
@@ -269,8 +276,9 @@ try {
         $normalizedRun -notmatch "-WindowStyle Hidden") {
         throw ("Installer did not preserve and modernize the previous login-startup preference. Actual Run value: " + $migratedRun)
     }
-    if (-not (Test-Path -LiteralPath $StartMenuShortcut -PathType Leaf)) {
-        throw "Installer did not create the Start Menu shortcut."
+    if (-not (Test-Path -LiteralPath $StartMenuShortcut -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $SettingsShortcut -PathType Leaf)) {
+        throw "Installer did not create both the mode-aware app and unconditional Settings shortcuts."
     }
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($StartMenuShortcut)
@@ -282,11 +290,19 @@ try {
         [StringComparison]::OrdinalIgnoreCase
     )
     $shortcutArguments = [string]$shortcut.Arguments
-    if (-not $shortcutTargetMatches -or -not [string]::IsNullOrEmpty($shortcutArguments)) {
-        throw ("Start Menu shortcut target mismatch. Actual: '$actualShortcutTarget'; expected: '$expectedShortcutTarget'; arguments: '$shortcutArguments'.")
+    $shortcutIcon = [string]$shortcut.IconLocation
+    if (-not $shortcutTargetMatches -or $shortcutArguments -ne "--launch" -or
+        $shortcutIcon -notlike ($InstalledIcon + ",*")) {
+        throw ("Start Menu shortcut mismatch. Target: '$actualShortcutTarget'; expected: '$expectedShortcutTarget'; arguments: '$shortcutArguments'; icon: '$shortcutIcon'.")
+    }
+    $settingsShortcut = $shell.CreateShortcut($SettingsShortcut)
+    $settingsTarget = [IO.Path]::GetFullPath(([string]$settingsShortcut.TargetPath).Replace("/", "\"))
+    if (-not [string]::Equals($settingsTarget, $expectedShortcutTarget, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::IsNullOrEmpty([string]$settingsShortcut.Arguments)) {
+        throw "The unconditional Settings shortcut does not point directly to crosshair-settings.exe."
     }
 
-    Write-SmokeLog "[2/9] real monitor discovery and opt-in autostart registry control"
+    Write-SmokeLog "[2/11] real monitor discovery and opt-in autostart registry control"
     $monitorJson = Invoke-Crosshair -Arguments @("--list-monitors")
     $monitors = $monitorJson | ConvertFrom-Json
     if (@($monitors).Count -lt 1) { throw "Windows reported no active monitors." }
@@ -312,23 +328,109 @@ try {
         throw "Remove autostart left a Crosshair Run registry value."
     }
 
-    Write-SmokeLog "[3/9] create isolated enabled config and cold-start overlay"
-    $null = Invoke-Crosshair -Arguments @("--set", '{"enabled":true,"shape":"dot","size":9}')
+    Write-SmokeLog "[3/11] command-only CLI launch is quiet, while explicit UI remains available"
+    $null = Invoke-Crosshair -Arguments @("--set", '{"enabled":true,"shape":"dot","size":9,"activity_mode":"command"}')
+    $settingsBeforeQuietLaunch = @(Get-Process -Name "crosshair-settings" -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+    $quietLaunch = Invoke-Crosshair -Arguments @()
+    if (-not [string]::IsNullOrEmpty([string]$quietLaunch)) {
+        throw "Command-only plain launch produced unexpected output: $quietLaunch"
+    }
+    $settingsAfterQuietLaunch = @(Get-Process -Name "crosshair-settings" -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+    if (@($settingsAfterQuietLaunch | Where-Object { $_ -notin $settingsBeforeQuietLaunch }).Count -gt 0) {
+        throw "Command-only plain launch unexpectedly opened Settings."
+    }
     $null = Invoke-Crosshair -Arguments @("--show")
     $status = Wait-ForStatus "Overlay: enabled"
     if (-not $status.Contains("Crosshair daemon: running")) {
         throw "Overlay status did not report a running daemon: $status"
     }
 
-    Write-SmokeLog "[4/9] persisted settings update through named pipe"
-    $null = Invoke-Crosshair -Arguments @("--set", '{"enabled":true,"shape":"cross","size":31,"opacity":0.72}')
+    Write-SmokeLog "[4/11] Start Menu launcher honors Command only and App UI without a console"
+    $null = Invoke-Crosshair -Arguments @("--set", '{"activity_mode":"command"}')
+    $settingsBeforeCommandLaunch = @(Get-Process -Name "crosshair-settings" -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+    $commandLauncher = Start-Process -FilePath $Settings -ArgumentList "--launch" -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru
+    if (-not (Wait-ForProcessExit -Process $commandLauncher -TimeoutMilliseconds 5000)) {
+        throw "The command-only Start Menu launcher did not exit promptly."
+    }
+    if ($commandLauncher.ExitCode -ne 0) { throw "The command-only launcher failed with exit code $($commandLauncher.ExitCode)." }
+    $settingsAfterCommandLaunch = @(Get-Process -Name "crosshair-settings" -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+    if (@($settingsAfterCommandLaunch | Where-Object { $_ -notin $settingsBeforeCommandLaunch }).Count -gt 0) {
+        throw "The command-only Start Menu launcher unexpectedly opened Settings."
+    }
+    $null = Invoke-Crosshair -Arguments @("--set", '{"activity_mode":"ui"}')
+    $uiLauncher = Start-Process -FilePath $Settings -ArgumentList "--launch" -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru
+    $uiHwnd = [IntPtr]::Zero
+    $uiDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    while ([DateTime]::UtcNow -lt $uiDeadline -and $uiHwnd -eq [IntPtr]::Zero) {
+        $uiLauncher.Refresh()
+        if ($uiLauncher.HasExited) { throw "The App UI Start Menu launcher exited before showing Settings (exit $($uiLauncher.ExitCode))." }
+        $uiWindows = @([CrosshairSmokeNative]::FindVisibleWindowsForProcess($uiLauncher.Id, "Crosshair Settings"))
+        if ($uiWindows.Count -gt 0) { $uiHwnd = [IntPtr]$uiWindows[0] }
+        if ($uiHwnd -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 100 }
+    }
+    if ($uiHwnd -eq [IntPtr]::Zero) { throw "The App UI Start Menu launcher did not open Settings." }
+    if (-not [CrosshairSmokeNative]::PostMessage($uiHwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)) {
+        throw "Could not close Settings after validating App UI launch."
+    }
+    if (-not (Wait-ForProcessExit -Process $uiLauncher -TimeoutMilliseconds 8000)) {
+        throw "The App UI Start Menu Settings window did not close cleanly."
+    }
+    $null = Invoke-Crosshair -Arguments @("--set", '{"activity_mode":"command"}')
+
+    Write-SmokeLog "[5/11] persist the tray default through named-pipe config updates"
+    $null = Invoke-Crosshair -Arguments @("--set", '{"enabled":true,"shape":"cross","size":31,"opacity":0.72,"activity_mode":"tray"}')
     $saved = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
-    if ($saved.shape -ne "cross" -or $saved.size -ne 31) {
-        throw "Named-pipe settings update was not persisted correctly."
+    if ($saved.shape -ne "cross" -or $saved.size -ne 31 -or $saved.activity_mode -ne "tray") {
+        throw "Named-pipe visual or activity-mode settings update was not persisted correctly."
     }
     $status = Wait-ForStatus "Overlay: enabled"
 
-    Write-SmokeLog "[5/9] open Settings through the same command used by the Start Menu"
+    Write-SmokeLog "[6/11] tray launch cold-starts an enabled overlay, then independently toggles it"
+    # Stop the daemon, then restore enabled=true directly in the isolated test
+    # config. Starting the tray from this state proves it shows an enabled
+    # crosshair even when no overlay process exists yet.
+    $null = Invoke-Crosshair -Arguments @("--hide")
+    $null = Wait-ForStatus "Crosshair daemon: not running"
+    $saved = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+    $saved.enabled = $true
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($ConfigPath, ($saved | ConvertTo-Json -Depth 16), $utf8NoBom)
+    $trayLauncher = Start-Process -FilePath $Settings -ArgumentList "--launch" -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru
+    if (-not (Wait-ForProcessExit -Process $trayLauncher -TimeoutMilliseconds 5000)) {
+        throw "The System tray Start Menu launcher did not hand off promptly."
+    }
+    if ($trayLauncher.ExitCode -ne 0) { throw "The System tray launcher failed with exit code $($trayLauncher.ExitCode)." }
+    $trayHwnd = [IntPtr]::Zero
+    $trayDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    while ([DateTime]::UtcNow -lt $trayDeadline -and $trayHwnd -eq [IntPtr]::Zero) {
+        $trayHwnd = [CrosshairSmokeNative]::FindWindow("CrosshairRustTrayWindow", "Crosshair Tray Controller")
+        if ($trayHwnd -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 100 }
+    }
+    if ($trayHwnd -eq [IntPtr]::Zero) {
+        throw "The System tray Start Menu launcher did not create the Crosshair tray controller."
+    }
+    [uint32]$trayOwnerPid = 0
+    $null = [CrosshairSmokeNative]::GetWindowThreadProcessId($trayHwnd, [ref]$trayOwnerPid)
+    $trayProcess = Get-Process -Id ([int]$trayOwnerPid) -ErrorAction Stop
+    if ($trayProcess.ProcessName -ne "crosshair") {
+        throw "Crosshair tray controller window belongs to an unexpected process."
+    }
+    $status = Wait-ForStatus "Overlay: enabled"
+    if (-not $status.Contains("Crosshair daemon: running")) {
+        throw "Tray startup did not start the saved enabled overlay from a cold state."
+    }
+    $trayCallback = 0x8000 + 41
+    $wmLeftButtonUp = 0x0202
+    if (-not [CrosshairSmokeNative]::PostMessage($trayHwnd, $trayCallback, [IntPtr]::Zero, [IntPtr]$wmLeftButtonUp)) {
+        throw "Could not post the tray icon left-click callback."
+    }
+    $null = Wait-ForStatus "Overlay: disabled"
+    if (-not [CrosshairSmokeNative]::PostMessage($trayHwnd, $trayCallback, [IntPtr]::Zero, [IntPtr]$wmLeftButtonUp)) {
+        throw "Could not post the second tray icon left-click callback."
+    }
+    $status = Wait-ForStatus "Overlay: enabled"
+
+    Write-SmokeLog "[7/11] open Settings explicitly while the tray is the saved default"
     $before = @(Get-Process -Name "crosshair-settings" -ErrorAction SilentlyContinue |
         ForEach-Object { $_.Id })
     $null = Invoke-Crosshair -Arguments @("--config")
@@ -353,7 +455,7 @@ try {
         throw "The installed CLI did not create a visible window titled 'Crosshair Settings'."
     }
 
-    Write-SmokeLog "[6/9] close Settings and verify overlay lifetime is independent"
+    Write-SmokeLog "[8/11] close Settings and verify overlay and tray lifetimes are independent"
     # Do not use Process.MainWindowHandle as a fallback. Winit creates its own
     # thread event-target HWND, and IME windows can also belong to this PID.
     # Posting WM_CLOSE to either internal HWND destroys the event loop plumbing
@@ -415,14 +517,24 @@ try {
     if (-not $status.Contains("Crosshair daemon: running")) {
         throw "Closing Settings unexpectedly stopped the overlay."
     }
+    if (-not [CrosshairSmokeNative]::PostMessage($trayHwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)) {
+        throw "Could not request tray controller shutdown."
+    }
+    if (-not (Wait-ForProcessExit -Process $trayProcess -TimeoutMilliseconds 5000)) {
+        throw "The tray controller did not exit after WM_CLOSE."
+    }
+    $status = Wait-ForStatus "Overlay: enabled"
+    if (-not $status.Contains("Crosshair daemon: running")) {
+        throw "Exiting the tray unexpectedly stopped the crosshair overlay."
+    }
 
-    Write-SmokeLog "[7/9] hide removes the overlay and exits daemon"
+    Write-SmokeLog "[9/11] hide removes the overlay and exits daemon"
     $null = Invoke-Crosshair -Arguments @("--hide")
     $status = Wait-ForStatus "Crosshair daemon: not running"
     $saved = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
     if ($saved.enabled) { throw "Hide did not persist enabled=false." }
 
-    Write-SmokeLog "[8/9] cold toggle starts, then toggle-off shuts down again"
+    Write-SmokeLog "[10/11] cold toggle starts, then toggle-off shuts down again"
     $null = Invoke-Crosshair -Arguments @("--toggle")
     $null = Wait-ForStatus "Overlay: enabled"
     $null = Invoke-Crosshair -Arguments @("--toggle")
@@ -431,7 +543,7 @@ try {
         throw "Toggle-off did not leave the overlay disabled: $status"
     }
 
-    Write-SmokeLog "[9/9] uninstall through the installed CLI from its own working directory"
+    Write-SmokeLog "[11/11] uninstall through the installed CLI from its own working directory"
     Write-SmokeLog "Launching --uninstall; the deferred helper must remove the install folder after the CLI exits."
     $uninstallProcess = Start-Process -FilePath $Bin -ArgumentList "--uninstall" -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru
     if (-not (Wait-ForProcessExit -Process $uninstallProcess -TimeoutMilliseconds 10000)) {
@@ -450,16 +562,21 @@ try {
     }
     if ((Test-Path -LiteralPath $Bin -PathType Leaf) -or
         (Test-Path -LiteralPath $Settings -PathType Leaf) -or
-        (Test-Path -LiteralPath $StartMenuShortcut -PathType Leaf)) {
+        (Test-Path -LiteralPath $InstalledIcon -PathType Leaf) -or
+        (Test-Path -LiteralPath $StartMenuShortcut -PathType Leaf) -or
+        (Test-Path -LiteralPath $SettingsShortcut -PathType Leaf)) {
         throw "Uninstaller left an installed binary or Start Menu shortcut."
     }
     if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
         throw "Uninstaller removed user configuration."
     }
-    Write-SmokeLog "PASS: Windows install, monitor discovery, named-pipe preview/set, layered overlay, Settings close, autostart toggle, hide/toggle-off, and uninstall."
+    Write-SmokeLog "PASS: Windows install, all three App Activity launch modes, no-console Start Menu UI/tray handoff, native tray cold-start/click toggle/independent exit, explicit Settings access, monitor discovery, named-pipe updates, layered overlay, autostart, hide/toggle-off and uninstall."
 }
 finally {
     Write-SmokeLog "Entering bounded test cleanup."
+    if ($null -ne $trayProcess -and -not $trayProcess.HasExited) {
+        try { Stop-Process -Id $trayProcess.Id -Force -ErrorAction SilentlyContinue } catch {}
+    }
     Stop-Crosshair
     try { Remove-ItemProperty -LiteralPath $RunKey -Name "Crosshair" -ErrorAction SilentlyContinue } catch {}
     if (Test-Path -LiteralPath $Bin -PathType Leaf) {

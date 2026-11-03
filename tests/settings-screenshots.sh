@@ -46,20 +46,25 @@ export XDG_SESSION_TYPE=x11
 unset WAYLAND_DISPLAY
 
 xsetroot -solid "#171a22"
+mkdir -p "$XDG_CONFIG_HOME/crosshair"
+printf '%s\n' '{"enabled":false,"activity_mode":"command"}' > "$XDG_CONFIG_HOME/crosshair/config.json"
+QUIET_OUTPUT="$("$BIN" 2>&1)"
+test -z "$QUIET_OUTPUT"
+test ! -e "$XDG_RUNTIME_DIR/crosshair.sock"
+# Explicit CLI control remains usable in Command only mode.
 "$BIN" --show
-"$SETTINGS" >"$ROOT/settings.log" 2>&1 &
-SETTINGS_PID=$!
+# Explicit Settings launch also remains available in Command only mode.
+"$BIN" --config
 
 for _ in $(seq 1 120); do
-    if ! kill -0 "$SETTINGS_PID" 2>/dev/null; then
-        cat "$ROOT/settings.log"
-        echo "Settings exited before showing a window" >&2
-        exit 1
+    WINDOW="$(xdotool search --onlyvisible --name '^Crosshair Settings$' 2>/dev/null | head -1 || true)"
+    if [[ -n "$WINDOW" ]]; then
+        SETTINGS_PID="$(xdotool getwindowpid "$WINDOW" 2>/dev/null || true)"
+        if [[ -n "$SETTINGS_PID" ]]; then break; fi
     fi
-    WINDOW="$(xdotool search --onlyvisible --pid "$SETTINGS_PID" 2>/dev/null | head -1 || true)"
-    if [[ -n "$WINDOW" ]]; then break; fi
     sleep 0.05
 done
+test -n "$SETTINGS_PID"
 test -n "$WINDOW"
 xdotool windowmove "$WINDOW" 40 40
 xdotool windowfocus "$WINDOW" || true
@@ -82,45 +87,54 @@ capture() {
     echo "$name.png $dimensions $(stat -c '%s bytes' "$OUT/$name.png")" | tee -a "$OUT/manifest.txt"
 }
 
-echo "[1/7] Capture General"
+echo "[1/8] Capture General"
 capture "01-general"
 
-echo "[2/7] Open Appearance"
-click_at 315 24
-capture "02-appearance-top"
-
-echo "[3/7] Open the main color palette"
-# Main color swatch: left pane, Color row.
-click_at 122 265
-capture "03-color-picker"
-
-echo "[4/7] Select a preset and verify that it persists"
-# Row 2, column 4 of the palette is #0ea5e9.
-click_at 204 353
+echo "[2/8] Inspect and change App Activity preference"
+click_at 390 120
+capture "02-app-activity-options"
+# Select App UI from the menu, starting from Command only. The explicit --config
+# path above must have opened Settings despite the quiet default launch.
+click_at 350 128
 sleep 0.8
-capture "04-color-selected"
-grep -qi '#0ea5e9' "$XDG_CONFIG_HOME/crosshair/config.json"
+grep -qi '"activity_mode": "ui"' "$XDG_CONFIG_HOME/crosshair/config.json"
 
-echo "[5/7] Expand Outline to create real scrollable content"
-click_at 220 322
+echo "[3/8] Open Appearance"
+click_at 315 24
+capture "03-appearance-top"
+
+echo "[4/8] Open the main color palette"
+# Main color swatch: left pane, Color row.
+click_at 114 272
+capture "04-color-picker"
+
+echo "[5/8] Select a preset and verify that it persists"
+# Row 3, column 4 of the palette is #ec4899.
+click_at 208 396
+sleep 0.8
+capture "05-color-selected"
+grep -qi '#ec4899' "$XDG_CONFIG_HOME/crosshair/config.json"
+
+echo "[6/8] Expand Outline to create real scrollable content"
+click_at 220 320
 sleep 0.35
-capture "05-appearance-expanded-top"
+capture "06-appearance-expanded-top"
 
-echo "[6/7] Scroll the Appearance pane to its lower controls"
+echo "[7/8] Scroll the Appearance pane to its lower controls"
 xdotool mousemove --sync "$((X + 280))" "$((Y + 420))"
 xdotool click --repeat 7 --delay 45 5
 sleep 0.5
-capture "06-appearance-lower"
-if cmp -s "$OUT/05-appearance-expanded-top.png" "$OUT/06-appearance-lower.png"; then
+capture "07-appearance-lower"
+if cmp -s "$OUT/06-appearance-expanded-top.png" "$OUT/07-appearance-lower.png"; then
     echo "Appearance ScrollView did not move when the wheel was used" >&2
     exit 1
 fi
 
-echo "[7/7] Return to the top to capture the full control layout"
+echo "[8/8] Return to the top to capture the full control layout"
 xdotool mousemove --sync "$((X + 280))" "$((Y + 420))"
 xdotool click --repeat 7 --delay 45 4
 sleep 0.5
-capture "07-appearance-top-again"
+capture "08-appearance-top-again"
 
 xdotool windowclose "$WINDOW"
 for _ in $(seq 1 100); do
@@ -129,4 +143,4 @@ for _ in $(seq 1 100); do
 done
 ! kill -0 "$SETTINGS_PID" 2>/dev/null
 
-echo "PASS: captured Rust Settings screens and exited Settings cleanly"
+echo "PASS: Command only stayed quiet, explicit --show/--config remained available, App Activity choices rendered, Settings screenshots/scrolling passed, and Settings exited cleanly"

@@ -7,7 +7,8 @@ $ErrorActionPreference = "Stop"
 $PackageRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $SourceCli = Join-Path $PackageRoot "crosshair.exe"
 $SourceSettings = Join-Path $PackageRoot "crosshair-settings.exe"
-foreach ($source in @($SourceCli, $SourceSettings)) {
+$SourceIcon = Join-Path $PackageRoot "crosshair.ico"
+foreach ($source in @($SourceCli, $SourceSettings, $SourceIcon)) {
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
         throw "Package is missing $source."
     }
@@ -21,6 +22,7 @@ $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\Crosshair"
 $InstalledCli = Join-Path $InstallDir "crosshair.exe"
 $StartMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
 $Shortcut = Join-Path $StartMenu "Crosshair.lnk"
+$SettingsShortcut = Join-Path $StartMenu "Crosshair Settings.lnk"
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $HadAutostart = $false
 try {
@@ -38,6 +40,12 @@ if (Test-Path -LiteralPath $InstalledCli -PathType Leaf) {
         if (-not $running) { break }
         Start-Sleep -Milliseconds 100
     }
+    # --quit stops the overlay daemon. A selected system-tray controller is
+    # intentionally independent, so close any remaining exact-install process
+    # before replacing the executable pair.
+    Get-Process -Name "crosshair" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -eq $InstalledCli } |
+        Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir, $StartMenu | Out-Null
@@ -48,7 +56,8 @@ if ($LASTEXITCODE -ne 0) {
     throw "Crosshair's native installer returned exit code $LASTEXITCODE."
 }
 $InstalledSettings = Join-Path $InstallDir "crosshair-settings.exe"
-foreach ($installed in @($InstalledCli, $InstalledSettings)) {
+$InstalledIcon = Join-Path $InstallDir "crosshair.ico"
+foreach ($installed in @($InstalledCli, $InstalledSettings, $InstalledIcon)) {
     if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) {
         throw "The native installer did not create $installed."
     }
@@ -69,12 +78,24 @@ foreach ($file in @("Install-Crosshair.ps1", "Uninstall-Crosshair.ps1", "README-
 
 $shell = New-Object -ComObject WScript.Shell
 $link = $shell.CreateShortcut($Shortcut)
+# Use the GUI-subsystem Settings executable as the launcher so App Activity
+# never creates a transient console window from the Start Menu.
 $link.TargetPath = $InstalledSettings
-$link.Arguments = ""
+$link.Arguments = "--launch"
 $link.WorkingDirectory = $InstallDir
-$link.Description = "Configure the Crosshair overlay"
-$link.IconLocation = "$InstalledCli,0"
+$link.Description = "Open Crosshair"
+$link.IconLocation = "$InstalledIcon,0"
 $link.Save()
+
+# Keep an unconditional Settings entry so Command only never removes the
+# obvious UI path from the Start Menu.
+$settingsLink = $shell.CreateShortcut($SettingsShortcut)
+$settingsLink.TargetPath = $InstalledSettings
+$settingsLink.Arguments = ""
+$settingsLink.WorkingDirectory = $InstallDir
+$settingsLink.Description = "Open Crosshair Settings"
+$settingsLink.IconLocation = "$InstalledIcon,0"
+$settingsLink.Save()
 
 if (-not $NoPathUpdate) {
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -101,6 +122,7 @@ if ($HadAutostart) {
 
 Write-Host "Crosshair 4.0.0 installed to $InstallDir"
 Write-Host "Start Menu shortcut: $Shortcut"
+Write-Host "Settings shortcut: $SettingsShortcut"
 if ($HadAutostart) {
     Write-Host "Previous login startup preference was migrated to the Rust executable."
 } else {

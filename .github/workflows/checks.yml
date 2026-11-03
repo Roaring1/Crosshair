@@ -217,6 +217,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $package | Out-Null
           Copy-Item target/release/crosshair.exe $package
           Copy-Item target/release/crosshair-settings.exe $package
+          Copy-Item crosshair.ico $package
           Copy-Item packaging/windows/Install-Crosshair.ps1 $package
           Copy-Item packaging/windows/Uninstall-Crosshair.ps1 $package
           Copy-Item packaging/windows/README-WINDOWS.txt $package

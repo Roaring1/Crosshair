@@ -67,6 +67,8 @@ pub fn read_bounded_line<R: std::io::BufRead>(reader: R) -> std::io::Result<Vec<
 pub struct Config {
     pub enabled: bool,
     pub auto_save: bool,
+    /// Launch behavior when Crosshair is opened without a command.
+    pub activity_mode: String,
     pub shape: String,
     pub opacity: f32,
     pub size: u16,
@@ -120,6 +122,7 @@ impl Default for Config {
         Self {
             enabled: true,
             auto_save: true,
+            activity_mode: "ui".into(),
             shape: "dot".into(),
             opacity: 0.95,
             size: 5,
@@ -209,6 +212,14 @@ impl Config {
         }
         if self.shape == "circle" {
             self.shape = "ring".into();
+        }
+        let activity_mode_supported = match self.activity_mode.as_str() {
+            "ui" | "command" => true,
+            "tray" => cfg!(windows),
+            _ => false,
+        };
+        if !activity_mode_supported {
+            self.activity_mode = "ui".into();
         }
         if !["all", "primary", "active", "name", "index"].contains(&self.monitor_mode.as_str()) {
             self.monitor_mode = "all".into();
@@ -1196,6 +1207,29 @@ mod tests {
         assert_eq!(config.shape, "cross");
         assert_eq!(config.reference_dot, ReferenceDot::default());
         assert_eq!(config.offset_x, 0);
+        assert_eq!(config.activity_mode, "ui");
+    }
+
+    #[test]
+    fn activity_mode_is_persisted_and_invalid_values_fall_back_safely() {
+        let command = Config::from_json(r#"{"activity_mode":"command"}"#).unwrap();
+        assert_eq!(command.activity_mode, "command");
+        let tray = Config::from_json(r#"{"activity_mode":"tray"}"#).unwrap();
+        assert_eq!(
+            tray.activity_mode,
+            if cfg!(windows) { "tray" } else { "ui" }
+        );
+        let invalid = Config::from_json(r#"{"activity_mode":"launch-random-shell"}"#).unwrap();
+        assert_eq!(invalid.activity_mode, "ui");
+        let serialized = tray.to_json().unwrap();
+        let expected = if cfg!(windows) { "tray" } else { "ui" };
+        assert!(serialized.contains(&format!("\"activity_mode\": \"{expected}\"")));
+        assert!(
+            command
+                .to_json()
+                .unwrap()
+                .contains("\"activity_mode\": \"command\"")
+        );
     }
 
     #[test]

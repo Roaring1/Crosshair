@@ -268,6 +268,10 @@ fn read_ui(
     let mut next = current.clone();
     next.enabled = ui.get_enabled();
     next.auto_save = ui.get_auto_save();
+    next.activity_mode = activity_mode_from_label(
+        ui.get_activity_selection().to_string().as_str(),
+    )
+    .into();
     next.shape = ui.get_shape().to_string();
     next.opacity = ui.get_crosshair_opacity();
     next.size = ui.get_size().clamp(1, 200) as u16;
@@ -344,9 +348,107 @@ fn set_monitor_ui(ui: &SettingsWindow, config: &Config, monitors: &[MonitorDescr
     )));
 }
 
+fn overlay_config_changed(previous: &Config, next: &Config) -> bool {
+    let mut previous_overlay = previous.clone();
+    let mut next_overlay = next.clone();
+    previous_overlay.activity_mode.clear();
+    next_overlay.activity_mode.clear();
+    previous_overlay.auto_save = false;
+    next_overlay.auto_save = false;
+    previous_overlay != next_overlay
+}
+
+fn activity_options() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        vec!["App UI".into(), "System tray".into(), "Command only".into()]
+    }
+    #[cfg(not(windows))]
+    {
+        vec!["App UI".into(), "Command only".into()]
+    }
+}
+
+#[cfg(test)]
+mod activity_mode_tests {
+    use super::{Config, activity_options, overlay_config_changed};
+
+    fn opens_settings(mode: &str) -> bool {
+        mode != "command" && !(cfg!(windows) && mode == "tray")
+    }
+
+    #[test]
+    fn launch_options_match_platform_capabilities() {
+        #[cfg(windows)]
+        assert_eq!(
+            activity_options(),
+            vec!["App UI", "System tray", "Command only"]
+        );
+        #[cfg(not(windows))]
+        assert_eq!(activity_options(), vec!["App UI", "Command only"]);
+        assert_eq!(super::activity_label("ui"), "App UI");
+        assert_eq!(super::activity_label("command"), "Command only");
+        assert_eq!(super::activity_mode_from_label("App UI"), "ui");
+        assert_eq!(super::activity_mode_from_label("Command only"), "command");
+        #[cfg(windows)]
+        {
+            assert_eq!(super::activity_label("tray"), "System tray");
+            assert_eq!(super::activity_mode_from_label("System tray"), "tray");
+        }
+        assert!(opens_settings("ui"));
+        assert!(!opens_settings("command"));
+        assert_eq!(opens_settings("tray"), !cfg!(windows));
+    }
+
+    #[test]
+    fn launch_preference_and_auto_save_changes_do_not_touch_the_overlay() {
+        let original = Config::default();
+        let mut candidate = original.clone();
+        candidate.activity_mode = "command".into();
+        assert!(!overlay_config_changed(&original, &candidate));
+
+        candidate = original.clone();
+        candidate.auto_save = !candidate.auto_save;
+        assert!(!overlay_config_changed(&original, &candidate));
+
+        candidate = original.clone();
+        candidate.color = "#123456".into();
+        assert!(overlay_config_changed(&original, &candidate));
+
+        candidate = original.clone();
+        candidate.enabled = false;
+        assert!(overlay_config_changed(&original, &candidate));
+    }
+}
+
+fn activity_mode_from_label(label: &str) -> &'static str {
+    match label {
+        "Command only" => "command",
+        #[cfg(windows)]
+        "System tray" => "tray",
+        _ => "ui",
+    }
+}
+
+fn activity_label(mode: &str) -> &'static str {
+    match mode {
+        "command" => "Command only",
+        #[cfg(windows)]
+        "tray" => "System tray",
+        _ => "App UI",
+    }
+}
+
 fn set_ui(ui: &SettingsWindow, config: &Config, monitors: &[MonitorDescriptor]) {
     ui.set_enabled(config.enabled);
     ui.set_auto_save(config.auto_save);
+    ui.set_activity_options(ModelRc::new(VecModel::from(
+        activity_options()
+            .into_iter()
+            .map(SharedString::from)
+            .collect::<Vec<_>>(),
+    )));
+    ui.set_activity_selection(SharedString::from(activity_label(&config.activity_mode)));
     ui.set_shape(SharedString::from(config.shape.as_str()));
     ui.set_crosshair_opacity(config.opacity);
     ui.set_size(config.size as i32);
@@ -631,6 +733,7 @@ enum SettingsTask {
         ui_id: u64,
         candidate: Config,
         persist: bool,
+        force_overlay: bool,
         feedback: Option<String>,
         monitors: Vec<MonitorDescriptor>,
     },
@@ -686,6 +789,7 @@ impl SettingsWorker {
                             ui_id,
                             candidate,
                             persist,
+                            force_overlay,
                             feedback,
                             monitors,
                         } => {
@@ -693,10 +797,23 @@ impl SettingsWorker {
                                 continue;
                             }
 
-                            worker_overlay_dirty.store(true, Ordering::Release);
-                            trace_settings(&paths, "I/O worker: applying overlay preview");
-                            let notify_result = notify_overlay(&candidate, &paths);
-                            trace_settings(&paths, "I/O worker: overlay preview call returned");
+                            let overlay_changed = {
+                                let previous = config.lock().unwrap();
+                                force_overlay || overlay_config_changed(&previous, &candidate)
+                            };
+                            let notify_result = if overlay_changed {
+                                worker_overlay_dirty.store(true, Ordering::Release);
+                                trace_settings(&paths, "I/O worker: applying overlay preview");
+                                let result = notify_overlay(&candidate, &paths);
+                                trace_settings(&paths, "I/O worker: overlay preview call returned");
+                                result
+                            } else {
+                                trace_settings(
+                                    &paths,
+                                    "I/O worker: saved launch preference without overlay IPC",
+                                );
+                                Ok(())
+                            };
                             if worker_apply_generation.load(Ordering::Acquire) != apply_id {
                                 continue;
                             }
@@ -824,6 +941,7 @@ impl SettingsWorker {
         ui_id: u64,
         candidate: Config,
         persist: bool,
+        force_overlay: bool,
         feedback: Option<String>,
         monitors: Vec<MonitorDescriptor>,
     ) -> Result<(), String> {
@@ -833,6 +951,7 @@ impl SettingsWorker {
                 ui_id,
                 candidate,
                 persist,
+                force_overlay,
                 feedback,
                 monitors,
             })
@@ -852,6 +971,7 @@ impl SettingsWorker {
             ui_id,
             candidate,
             persist,
+            true,
             feedback.map(str::to_string),
             monitors,
         )
@@ -898,6 +1018,7 @@ fn enqueue_apply(
             ui_id,
             candidate,
             persist,
+            force_overlay: false,
             feedback,
             monitors,
         })
@@ -931,6 +1052,58 @@ fn enqueue_cli(
         .map_err(|error| format!("Settings I/O worker is unavailable: {error}"))
 }
 
+#[cfg(windows)]
+fn focus_existing_settings_window() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, SW_SHOW, SetForegroundWindow, ShowWindow,
+    };
+
+    let title: Vec<u16> = "Crosshair Settings"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let existing = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
+    if existing.is_null() {
+        return false;
+    }
+    unsafe {
+        ShowWindow(existing, SW_SHOW);
+        SetForegroundWindow(existing);
+    }
+    true
+}
+
+#[cfg(windows)]
+fn launch_preferred_activity(config: &Config) -> Result<bool, String> {
+    match config.activity_mode.as_str() {
+        "command" => Ok(true),
+        "tray" => {
+            let current = std::env::current_exe().map_err(|error| error.to_string())?;
+            let cli = current
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join("crosshair.exe");
+            if !cli.is_file() {
+                return Err(format!(
+                    "Crosshair CLI was not found beside Settings: {}",
+                    cli.display()
+                ));
+            }
+            use std::os::windows::process::CommandExt;
+            Command::new(cli)
+                .arg("--tray")
+                .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(|error| format!("Could not start the Crosshair tray: {error}"))?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 fn run() -> Result<(), String> {
     // On Windows, the Winit backend normally keeps a hidden native HWND alive
     // when a Slint component is hidden. Settings is a one-window, one-shot
@@ -949,6 +1122,16 @@ fn run() -> Result<(), String> {
     trace_settings(&paths, "startup: application paths discovered");
     let mut initial = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
     initial.normalize();
+    #[cfg(windows)]
+    if std::env::args().any(|argument| argument == "--launch")
+        && launch_preferred_activity(&initial)?
+    {
+        return Ok(());
+    }
+    #[cfg(windows)]
+    if focus_existing_settings_window() {
+        return Ok(());
+    }
     let ui = SettingsWindow::new().map_err(|error| error.to_string())?;
     #[cfg(target_os = "linux")]
     let kde_accent_timer = start_kde_accent_sync();
@@ -1360,7 +1543,7 @@ fn run() -> Result<(), String> {
         Config::load(&paths.config_file).map_err(|error| error.to_string())?
     };
 
-    if (final_config != previous || overlay_dirty) && !uninstalled {
+    if (overlay_config_changed(&previous, &final_config) || overlay_dirty) && !uninstalled {
         if let Err(error) = notify_overlay(&final_config, &paths) {
             eprintln!("Could not apply final Settings state after close: {error}");
         }

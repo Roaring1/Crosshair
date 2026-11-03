@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 BIN="${CROSSHAIR_BIN:-$REPO_ROOT/target/debug/crosshair}"
+SETTINGS_BIN="${CROSSHAIR_SETTINGS_BIN:-$REPO_ROOT/target/debug/crosshair-settings}"
 ROOT="$(mktemp -d)"
 
 cleanup() {
@@ -12,7 +13,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [[ ! -x "$BIN" || ! -x "$REPO_ROOT/target/debug/crosshair-settings" ]]; then
+if [[ ! -x "$BIN" || ! -x "$SETTINGS_BIN" ]]; then
     echo "Build both Crosshair executables before running the installer smoke test." >&2
     exit 2
 fi
@@ -72,6 +73,9 @@ escaped = (
 assert f'Exec="{escaped}" --daemon --no-ui' in content, content
 assert f'TryExec={executable.replace(chr(92), chr(92) * 2)}' in content, content
 assert "NoDisplay=true" in content
+app_content = app_entry.read_text(encoding="utf-8")
+assert f'Exec="{escaped}"' in app_content, app_content
+assert "--config" not in app_content, app_content
 assert stat.S_IMODE(entry.parent.stat().st_mode) == 0o700
 assert stat.S_IMODE(entry.stat().st_mode) == 0o600
 assert stat.S_IMODE(executable_path.stat().st_mode) == 0o700
@@ -163,7 +167,19 @@ test -L "$APP_ICON"
 rm "$APP_ICON"
 mv "$ROOT/original-crosshair.svg" "$APP_ICON"
 
-echo "[7] uninstall removes application files but retains config"
+echo "[7] command-only launch stays quiet without disabling explicit CLI commands"
+MODE_ROOT="$ROOT/command-only-mode"
+mkdir -p "$MODE_ROOT/home" "$MODE_ROOT/config/crosshair" "$MODE_ROOT/data" "$MODE_ROOT/state" "$MODE_ROOT/runtime"
+chmod 700 "$MODE_ROOT/runtime"
+printf '%s\n' '{"activity_mode":"command","enabled":false}' > "$MODE_ROOT/config/crosshair/config.json"
+MODE_OUTPUT="$(env HOME="$MODE_ROOT/home" XDG_CONFIG_HOME="$MODE_ROOT/config" XDG_DATA_HOME="$MODE_ROOT/data" XDG_STATE_HOME="$MODE_ROOT/state" XDG_RUNTIME_DIR="$MODE_ROOT/runtime" "$BIN" 2>&1)"
+test -z "$MODE_OUTPUT"
+MODE_HELP="$(env HOME="$MODE_ROOT/home" XDG_CONFIG_HOME="$MODE_ROOT/config" XDG_DATA_HOME="$MODE_ROOT/data" XDG_STATE_HOME="$MODE_ROOT/state" XDG_RUNTIME_DIR="$MODE_ROOT/runtime" "$BIN" --help)"
+grep -Fq -- "--toggle" <<<"$MODE_HELP"
+test ! -e "$MODE_ROOT/runtime/crosshair.sock"
+echo "PASS: command-only plain launch is quiet; explicit CLI remains available"
+
+echo "[8] uninstall removes application files but retains config"
 "$BIN" --uninstall
 test ! -e "$AUTOSTART"
 test ! -e "$XDG_BIN_HOME/crosshair"

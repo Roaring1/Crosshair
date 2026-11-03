@@ -490,6 +490,7 @@ export component SettingsWindow inherits Window {
     title: "Crosshair Settings";
     width: 640px;
     height: (root.active-tab == 0 && !root.shortcuts-expanded && !root.profile-panel-visible ? 280px : 520px)
+        + (root.active-tab == 0 ? 68px : 0px)
         + (root.system-feedback != "" ? 44px : 0px);
     animate height {
         duration: 140ms;
@@ -500,6 +501,8 @@ export component SettingsWindow inherits Window {
     in-out property <int> active-tab: 0;
     in-out property <bool> enabled: true;
     in-out property <bool> auto-save: true;
+    in-out property <string> activity-selection: "App UI";
+    in-out property <[string]> activity-options: ["App UI", "Command only"];
     in-out property <string> monitor-selection: "All monitors";
     in-out property <[string]> monitor-options: ["All monitors", "Primary monitor", "Cursor-active monitor"];
     in-out property <string> shape: "dot";
@@ -718,6 +721,25 @@ export component SettingsWindow inherits Window {
                         checked <=> root.auto-save;
                         toggled => { root.settings_changed(); }
                     }
+                }
+
+                HorizontalLayout {
+                    height: 32px;
+                    Text { text: "App Activity"; vertical-alignment: center; width: 82px; }
+                    ComboBox {
+                        model: root.activity-options;
+                        current-value <=> root.activity-selection;
+                        selected(value) => { root.activity-selection = value; root.settings_changed(); }
+                        horizontal-stretch: 1;
+                        height: 28px;
+                    }
+                }
+
+                Text {
+                    text: "This controls a plain launch only. Settings and CLI commands remain available explicitly in every mode. The tray is supported on Windows.";
+                    font-size: 10px;
+                    color: Palette.foreground;
+                    wrap: word-wrap;
                 }
 
                 HorizontalLayout {
