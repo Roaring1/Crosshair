@@ -284,10 +284,21 @@ try {
     }
 
     Write-SmokeLog "[6/9] close Settings and verify overlay lifetime is independent"
-    $null = $settingsProcess.CloseMainWindow()
+    $closeSent = $settingsProcess.CloseMainWindow()
+    Write-SmokeLog ("Settings WM_CLOSE posted: " + $closeSent + "; pid=" + $settingsProcess.Id + "; hwnd=" + $settingsProcess.MainWindowHandle)
     if (-not $settingsProcess.WaitForExit(8000)) {
+        $settingsProcess.Refresh()
+        Write-SmokeLog ("Settings close timeout: pid=" + $settingsProcess.Id + "; hasExited=" + $settingsProcess.HasExited + "; hwnd=" + $settingsProcess.MainWindowHandle)
+        $daemonLog = Join-Path $env:LOCALAPPDATA "Crosshair\crosshair.log"
+        if (Test-Path -LiteralPath $daemonLog -PathType Leaf) {
+            Write-SmokeLog "Captured Crosshair and Settings lifecycle diagnostics:"
+            Get-Content -LiteralPath $daemonLog | ForEach-Object { Write-SmokeLog ("APP: " + $_) }
+        } else {
+            Write-SmokeLog "No Crosshair diagnostic log was created while Settings was open."
+        }
         throw "Settings did not exit after its window-close request."
     }
+    Write-SmokeLog "Settings process exited after WM_CLOSE."
     $status = Wait-ForStatus "Overlay: enabled"
     if (-not $status.Contains("Crosshair daemon: running")) {
         throw "Closing Settings unexpectedly stopped the overlay."
