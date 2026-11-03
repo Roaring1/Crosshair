@@ -99,8 +99,8 @@ try {
     }
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($StartMenuShortcut)
-    $actualShortcutTarget = [IO.Path]::GetFullPath(([string]$shortcut.TargetPath).Replace("/", "\\"))
-    $expectedShortcutTarget = [IO.Path]::GetFullPath(([string]$Settings).Replace("/", "\\"))
+    $actualShortcutTarget = [IO.Path]::GetFullPath(([string]$shortcut.TargetPath).Replace("/", "\"))
+    $expectedShortcutTarget = [IO.Path]::GetFullPath(([string]$Settings).Replace("/", "\"))
     $shortcutTargetMatches = [string]::Equals(
         $actualShortcutTarget,
         $expectedShortcutTarget,
