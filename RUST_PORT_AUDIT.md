@@ -102,7 +102,7 @@ The requested Rust Settings layout is intentionally smaller than the legacy five
 - No in-app title/header, footer, permanent status strip, dashboard cards, AI artwork, or resident tray process. General uses a compact window height; Appearance expands to fit its controls. The window keeps a short 140 ms height transition; managed WM_DELETE close stops the pending debounce timer and lets Slint unwind before hiding the native surface.
 - Closing Settings with the window manager's X ends the Settings process without stopping an already-enabled overlay. The close path must flush the final debounced state when auto-save is enabled and restore the saved state when auto-save is off.
 
-The Rust Settings UI is built in Slint (software renderer), not GTK, egui or a webview. It has General/Appearance navigation and a System popup. Optional Linux XDG login startup is a real explicit opt-in: Install calls the CLI's --autostart, Remove calls --remove-autostart, and ordinary --install always removes a stale login entry. The entry runs the hidden daemon with --daemon --no-ui; it does not change the Padfire-only default unless the user explicitly enables it. Linux app installation now reads source executables with final-component no-follow, nonblocking and bounded reads; preflights all three destinations before writing; writes CLI/Settings binaries with owner-only 0700 mode through pinned-directory atomic replacement; and writes the app-menu entry and autostart through the same core atomic writer. Replacement refuses symlinks, non-regular files, foreign-owned files and multiply-linked targets. Uninstall preflights the CLI, Settings, autostart and app-menu targets as a batch; a suspicious target aborts before any artifact is removed. The System-menu Uninstall item asks for confirmation, calls the sibling CLI's --uninstall, and retains config. Settings IPC and installer CLI actions run on one serial background worker; config updates use request generations to discard stale previews, and results return to the UI through Slint's event loop. Autostart enable/remove does not invalidate a pending preview or auto-save; uninstall alone invalidates it before replacing/removing the executable pair. Closing Settings joins the worker before the final persistence/overlay flush. These paths are tested with isolated XDG directories, special characters in install paths, symlink refusal, failed-install/no-partial-write and failed-uninstall/no-partial-removal assertions, config retention, Xvfb button interactions, and a delayed fake IPC peer that proves the Appearance tab resizes before a withheld reply arrives. Windows/macOS login startup and native installation still require platform-specific work.
+The Rust Settings UI is built in Slint (software renderer), not GTK, egui or a webview. It has General/Appearance navigation and a System popup. Optional Linux XDG login startup is a real explicit opt-in: Install calls the CLI's --autostart, Remove calls --remove-autostart, and ordinary --install always removes a stale login entry. The entry runs the hidden daemon with --daemon --no-ui; it does not change the Padfire-only default unless the user explicitly enables it. Linux app installation now reads source executables with final-component no-follow, nonblocking and bounded reads; preflights all three destinations before writing; writes CLI/Settings binaries with owner-only 0700 mode through pinned-directory atomic replacement; and writes the app-menu entry and autostart through the same core atomic writer. Replacement refuses symlinks, non-regular files, foreign-owned files and multiply-linked targets. Uninstall preflights the CLI, Settings, autostart and app-menu targets as a batch; a suspicious target aborts before any artifact is removed. The System-menu Uninstall item asks for confirmation, calls the sibling CLI's --uninstall, and retains config. Settings IPC and installer CLI actions run on one serial background worker; config updates use request generations to discard stale previews, and results return to the UI through Slint's event loop. Autostart enable/remove does not invalidate a pending preview or auto-save; uninstall alone invalidates it before replacing/removing the executable pair. Closing Settings joins the worker before the final persistence/overlay flush. These paths are tested with isolated XDG directories, special characters in install paths, symlink refusal, failed-install/no-partial-write and failed-uninstall/no-partial-removal assertions, config retention, Xvfb button interactions, and a delayed fake IPC peer that proves the Appearance tab resizes before a withheld reply arrives. The Windows native backend and per-user install/autostart path are now present in this draft branch; native CI results and real Windows-session validation are still pending. macOS remains future platform work.
 
 ## Reusable data versus OS-specific work
 
@@ -110,18 +110,18 @@ The Rust Settings UI is built in Slint (software renderer), not GTK, egui or a w
 | --- | --- | --- |
 | JSON config schema and values | Data is reusable | Implement typed Rust schema; continue reading current Linux JSON unchanged |
 | Shapes, geometry, outline/shadow math | Behavior is reusable | Port renderer and test output; Python source itself is not reused |
-| CLI command names and semantics | Contract is reusable | Native Rust CLI/controller and Windows process launch |
-| IPC command payload schema | Contract is reusable | Unix socket + peer UID on Linux; named pipe with current-user ACL on Windows |
-| Single-instance/lifecycle semantics | Concept is reusable | Linux file lock; Windows named mutex/lock; no PID-name guessing |
-| Config/log paths | Not portable verbatim | XDG on Linux; APPDATA/LOCALAPPDATA on Windows |
+| CLI command names and semantics | Contract is reusable | Rust CLI/controller and Windows process launch now present in this draft branch |
+| IPC command payload schema | Contract is reusable | Linux Unix socket and Windows per-user named-pipe implementations are present; native checks pending |
+| Single-instance/lifecycle semantics | Concept is reusable | Linux file lock; Windows first-instance named-pipe listener and orderly shutdown |
+| Config/log paths | Not portable verbatim | XDG on Linux; APPDATA/LOCALAPPDATA on Windows; both paths implemented |
 | GTK3 Settings widgets | No | Rebuild the controls in a portable Rust GUI |
 | GDK monitor enumeration | No | Wayland/XRandR and Win32 monitor APIs |
 | GTK Layer Shell overlay | No | Native Wayland layer-shell backend; separate X11 backend; Win32 layered window |
 | Cairo drawing | Geometry and layer order are reusable | Small software rasterizer is compared against the Cairo reference using shape bounds and antialiasing-tolerant coverage metrics |
-| .desktop / XDG autostart | No | Windows Start Menu/Startup registration and uninstall path |
+| .desktop / XDG autostart | No | Windows Start Menu shortcut, opt-in HKCU Run registration and config-preserving uninstall scripts are present |
 | Tray/AppIndicator | Intentionally dropped | No Linux or Windows tray process in the target design |
 
-A Rust source tree can share the config, renderer, UI view-model, CLI contract and much of the IPC protocol. It cannot copy a Linux Wayland surface or X11 window onto Windows. The Windows executable must be compiled for a Windows target and use Windows windowing, monitor, storage, startup and IPC primitives.
+The Rust branch now shares configuration, renderer, UI state and CLI contracts while selecting native platform adapters at compile time. Linux uses Wayland/X11; Windows uses Win32 layered windows, monitor/DPI APIs, per-user named-pipe IPC, registry autostart and a native install/uninstall path.
 
 ## Proposed Rust architecture
 
@@ -132,7 +132,7 @@ A Rust source tree can share the config, renderer, UI view-model, CLI contract a
 5. **Platform adapters**:
    - Linux Wayland: Smithay client toolkit + wlr layer-shell when advertised, SHM buffer, keyboard NONE, empty input region.
    - Linux X11: X11 connection, ARGB visual, EWMH topmost/skip-taskbar hints and Shape input region.
-   - Windows: Win32 layered transparent no-activate topmost window; EnumDisplayMonitors/DPI-aware geometry; named-pipe IPC and a per-user mutex.
+   - Windows: implemented in this draft as a Win32 layered transparent no-activate topmost window; EnumDisplayMonitors/DPI-aware geometry; per-user named-pipe IPC with first-instance protection; opt-in HKCU Run startup and per-user PowerShell package scripts. CI/real-session verification is still pending.
 6. **No resident tray**. No login autostart by default. No Crosshair process when OFF and Settings is closed.
 
 The renderer should use a tiny software buffer around the crosshair, not a framebuffer-sized surface. The daemon should unmap/destroy the surface when disabled, use event-driven monitor changes, and avoid frame callbacks/animation entirely.
@@ -223,10 +223,10 @@ These figures are a controlled Xvfb/X11 baseline, not a measurement on the targe
 
 ### Remaining work / release blockers
 
-1. **Windows is not implemented yet.** Windows IPC and overlay startup are explicit stubs. The new Windows CI job is compile-only; no Win32 layered window, monitor/DPI events, no-activate/input-transparent behavior, named pipe, ACL, mutex or Windows integration tests have been delivered. The non-Linux atomic-file-write code was corrected to be compilable, but its security behavior still needs native Windows testing.
+1. **Windows implementation is present but not yet verified.** The draft now contains the Win32 layered-window backend, monitor/DPI handling, click-through/no-activate window styles, per-user named-pipe IPC, opt-in registry autostart, PowerShell install/uninstall scripts and a nine-step native Windows smoke test. The Windows runner must pass compilation, unit tests and the package/overlay/Settings lifecycle before this path can be called verified; a real Windows session is still needed for DPI, focus and multi-monitor confirmation.
 2. **macOS is not implemented or a release target.** It would need another window/monitor/lifecycle adapter.
 3. **Wayland monitor parity is incomplete.** The read-only output registry query succeeds on the active KDE session, and a real layer-shell lifecycle passes on an isolated KWin virtual compositor. Cursor-active selection is unavailable, and primary currently falls back to the top-left-most output (not a compositor-reported primary). All/index/named-connector selection and duplicate-name ordinals have headless tests. The output-layout math and HiDPI renderer preserve scaled logical values, but physical multi-monitor placement, fractional scale, output hotplug, pointer passthrough and fullscreen-game behavior still need validation on the active KDE compositor.
-4. **Installer packaging and transaction rollback remain.** Linux optional XDG autostart and the confirmed Settings uninstall path are implemented. Linux CLI/Settings binaries and the app-menu entry now use no-follow, owner-checked atomic writes; uninstall validates all app-owned targets before deleting any. The multi-file install is not a single transaction, so an I/O failure after one atomic artifact replacement can still leave an incomplete upgrade; add staging/rollback before calling packaging complete. Icon metadata and clean-machine dependency checks also remain. Windows/macOS installers and login-startup equivalents are unimplemented. The Padfire-first default remains no autostart.
+4. **Installer packaging and transaction rollback remain.** Linux optional XDG autostart and the confirmed Settings uninstall path are implemented. Linux CLI/Settings binaries and the app-menu entry now use no-follow, owner-checked atomic writes; uninstall validates all app-owned targets before deleting any. Windows per-user installer, Start Menu shortcut, opt-in Run-key migration and config-preserving uninstall scripts are present, with an install/overlay/Settings/uninstall smoke test in CI. Both platform install paths still need staging/rollback for multi-file upgrade failures; clean-machine dependency checks and final packaging formats also remain. The Padfire-first/on-demand default remains no autostart.
 5. **Settings worker stress/lifecycle coverage is substantially exercised, but real daemon restart remains unverified.** Xvfb tests cover delayed IPC responsiveness, graceful close/worker join/final auto-save, queued CLI-action draining at shutdown, recovery after a dropped acknowledgement, and rapid edits across an atomic socket-listener replacement. The replacement-listener test does not exercise a live overlay process crash/restart or its compositor interactions.
 6. **Persistence and IPC stress coverage is incomplete.** The 64 KiB framing boundary, oversized-request rejection and required newline delimiter have direct shared-reader tests. Five Linux lock/socket tests verify eight-way concurrent lock exclusivity, symlink/hard-link lock refusal, stale owned-socket replacement, private permissions/peer credentials, refusal of unsafe socket targets, and safe cleanup after socket-path substitution. Still add true multi-process cold-start tests, malformed JSON-body handling at the server boundary, command-timeout coverage, live daemon restart handoff, and close-during-debounce tests.
 7. **Renderer parity coverage is now representative, not exhaustive.** The 20-case Cairo comparison covers shared shape values, main/outline/shadow passes, color and opacity, and catches zero-gap stroke-overlap errors. Add property-based sweeps over all normalized parameter boundaries and retain screenshot/image inspection against the frozen GTK implementation.
@@ -238,9 +238,9 @@ These figures are a controlled Xvfb/X11 baseline, not a measurement on the targe
 The workflow now runs the existing Python gates plus:
 - Linux Rust formatting, tests, native debug/release builds, and debug/release installer lifecycle tests.
 - Isolated Xvfb tests for X11 pass-through/cold-start/shutdown, Settings autostart controls, delayed-IPC responsiveness plus graceful close/save, and independent Settings/overlay lifetime.
-- A Windows-latest compile check for the shared core, Settings UI and cfg-gated Windows code.
+- A Windows-latest job for formatting, Windows-native tests, optimized executables, the per-user install/overlay/Settings/uninstall smoke test and a downloadable x64 package.
 
-The Windows job is intentionally not described as Windows feature verification. CI results must be inspected after the branch is pushed.
+The Windows job now exercises the native feature path rather than stopping at a compile check. Its current run is pending; passing CI is still not a substitute for real Windows desktop validation.
 
 
 ## Settings UI visual pass (2026-11-02)
@@ -289,3 +289,34 @@ working tree remains uncommitted and is not represented as CI-verified here.
 The CI artifact remains the final cross-environment verification gate; the
 local Xvfb run does not claim to validate KDE Wayland sizing or native Windows
 rendering.
+
+
+### Native Windows implementation added (2026-11-02)
+
+The previous audit blocker that described Windows as an unimplemented stub is
+superseded by the current `rust-port` branch. The Windows adapter is now
+implemented in `src/platform/windows.rs`: it enumerates display devices,
+selects configured monitors, applies per-monitor DPI scaling, creates layered
+topmost no-activate transparent windows, and renders through the same Rust
+rasterizer used by Linux. It receives commands over a per-user named pipe,
+rejects remote clients, uses the current token's default DACL, and protects
+the first named-pipe instance against a competing server. Preview and persisted
+setting updates share the existing configuration validation path.
+
+The Windows CLI supports monitor listing, show/hide/toggle, optional login
+startup, Settings launch and uninstall. The package contains per-user
+PowerShell installer/uninstaller scripts that create a Start Menu shortcut,
+migrate an explicitly opted-in Run-key startup preference, clean up binaries
+and preserve configuration. `tests/windows-smoke.ps1` covers installation,
+monitor enumeration, registry startup add/remove, daemon IPC, Settings open
+and close, hide/toggle and uninstall.
+
+The new `windows-latest` CI job runs rustfmt, all Windows-native tests, an
+optimized build, that full smoke test, and publishes a
+`Crosshair-Windows-x64` package artifact. This audit was updated before the
+current run completed: the branch contains the implementation and tests, but
+the native CI result and real Windows desktop behavior remain unverified.
+
+The local Linux checkout cannot cross-compile to MSVC because it does not
+have the Windows standard-library target installed. That is why the Windows
+runner is the authoritative compile/runtime gate for this revision.
