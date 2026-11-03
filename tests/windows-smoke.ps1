@@ -70,7 +70,18 @@ function Invoke-Crosshair {
     if (-not $process.WaitForExit($TimeoutMilliseconds)) {
         try { $process.Kill($true) } catch {}
         try { $process.WaitForExit(2000) | Out-Null } catch {}
-        Write-SmokeLog ("CLI TIMEOUT: " + $label + " exceeded " + $TimeoutMilliseconds + " ms; process was terminated.")
+        $timeoutStdout = ""
+        $timeoutStderr = ""
+        try { $timeoutStdout = $stdoutTask.GetAwaiter().GetResult() } catch {}
+        try { $timeoutStderr = $stderrTask.GetAwaiter().GetResult() } catch {}
+        Write-SmokeLog ("CLI TIMEOUT: " + $label + " exceeded " + $TimeoutMilliseconds + " ms; process tree was terminated.")
+        if (-not [string]::IsNullOrWhiteSpace($timeoutStdout)) {
+            Write-SmokeLog ("CLI TIMEOUT STDOUT: " + $timeoutStdout.Trim())
+        }
+        if (-not [string]::IsNullOrWhiteSpace($timeoutStderr)) {
+            Write-SmokeLog ("CLI TIMEOUT STDERR: " + $timeoutStderr.Trim())
+        }
+        $process.Dispose()
         throw ($label + " timed out after " + $TimeoutMilliseconds + " ms.")
     }
     $process.WaitForExit()

@@ -85,12 +85,12 @@ The Windows CI job builds the two native executables, exercises the per-user ins
 When the Windows package artifact is available on the draft PR workflow run, download and extract it to a normal user-writable directory, then run this from PowerShell:
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File .\\Install-Crosshair.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\Install-Crosshair.ps1
 ```
 
-No administrator rights are required. The installer targets `%LOCALAPPDATA%\\Programs\\Crosshair`, adds that directory to the current user's PATH, and creates a Start Menu shortcut for Settings. A fresh install does not enable login autostart. Existing explicit opt-in startup is migrated to the new native executable.
+No administrator rights are required. The installer targets `%LOCALAPPDATA%\Programs\Crosshair`, adds that directory to the current user's PATH, and creates a Start Menu shortcut for Settings. A fresh install does not enable login autostart. Existing explicit opt-in startup is migrated to the new native executable.
 
-The in-app uninstall action defers file removal until the CLI and Settings processes have exited. Configuration under `%APPDATA%\\Crosshair` is retained.
+The in-app uninstall action defers file removal until the CLI and Settings processes have exited. Configuration under `%APPDATA%\Crosshair` is retained.
 
 **Do not treat the Windows port as fully verified until the CI smoke test passes and the package has been exercised on the target Windows laptop.** The smoke test cannot replace checks for the actual GPU/display driver, multiple monitors and mixed DPI, game fullscreen behavior, pointer passthrough, sleep/resume and Settings behavior on the real desktop.
 
@@ -123,11 +123,11 @@ crosshair --uninstall
 
 | Purpose | Linux | Windows |
 | --- | --- | --- |
-| Configuration | `${XDG_CONFIG_HOME:-~/.config}/crosshair/config.json` | `%APPDATA%\\Crosshair\\config.json` |
-| CLI | `${XDG_BIN_HOME:-~/.local/bin}/crosshair` | `%LOCALAPPDATA%\\Programs\\Crosshair\\crosshair.exe` |
-| Settings | `${XDG_BIN_HOME:-~/.local/bin}/crosshair-settings` | `%LOCALAPPDATA%\\Programs\\Crosshair\\crosshair-settings.exe` |
-| App-menu / Start Menu | `${XDG_DATA_HOME:-~/.local/share}/applications/crosshair.desktop` | `%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Crosshair.lnk` |
-| Log | `${XDG_STATE_HOME:-~/.local/state}/crosshair/crosshair.log` | `%LOCALAPPDATA%\\Crosshair\\crosshair.log` |
+| Configuration | `${XDG_CONFIG_HOME:-~/.config}/crosshair/config.json` | `%APPDATA%\Crosshair\config.json` |
+| CLI | `${XDG_BIN_HOME:-~/.local/bin}/crosshair` | `%LOCALAPPDATA%\Programs\Crosshair\crosshair.exe` |
+| Settings | `${XDG_BIN_HOME:-~/.local/bin}/crosshair-settings` | `%LOCALAPPDATA%\Programs\Crosshair\crosshair-settings.exe` |
+| App-menu / Start Menu | `${XDG_DATA_HOME:-~/.local/share}/applications/crosshair.desktop` | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Crosshair.lnk` |
+| Log | `${XDG_STATE_HOME:-~/.local/state}/crosshair/crosshair.log` | `%LOCALAPPDATA%\Crosshair\crosshair.log` |
 
 The legacy Python source in this branch is retained as a compatibility and renderer-parity reference for CI. It is not installed or launched by the native Rust package. The established Python application and its release history remain on `main`.
 
