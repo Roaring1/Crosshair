@@ -104,7 +104,10 @@ waits for redirected stream readers and can remain open while a detached
 daemon owns an inherited pipe handle. Output tasks are read only when already
 complete. The wrapper writes per-command stage diagnostics to `RUNNER_TEMP`;
 the workflow uploads those logs even when the integration step fails or
-reaches its timeout. The Windows daemon also records startup, monitor
-enumeration, overlay creation and IPC request/response milestones in
-`%LOCALAPPDATA%\Crosshair\crosshair.log`; the wrapper includes that
-application log in the uploaded artifact on a timeout or CLI failure.
+reaches its timeout. The Windows daemon records startup, monitor enumeration, overlay creation
+and IPC request/response milestones in
+`%LOCALAPPDATA%\Crosshair\crosshair.log`. The Settings process appends its
+close callback, Slint event-loop termination, and I/O-worker shutdown/join
+milestones to the same log. If Settings does not exit after the smoke posts
+`WM_CLOSE`, the wrapper records the close result, PID, HWND and app log in
+the uploaded diagnostic artifact.
