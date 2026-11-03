@@ -837,6 +837,7 @@ fn run() -> Result<(), String> {
     let close_timer = timer.clone();
     let close_quit_timer = Rc::new(Timer::default());
     let close_quit_timer_callback = close_quit_timer.clone();
+    let close_quit_ui = ui.as_weak();
     let close_paths = paths.clone();
     ui.window().on_close_requested(move || {
         trace_settings(
@@ -846,17 +847,34 @@ fn run() -> Result<(), String> {
         close_requested.store(true, Ordering::Release);
         close_timer.stop();
 
-        // Keep the native window alive until ComponentHandle::run() regains
-        // control and performs its normal hide. A one-shot Slint timer moves
-        // the quit request to the next event-loop turn; this avoids re-entering
-        // Winit's Windows close dispatch while its native HWND is being torn
-        // down, and does not leave a thread or polling timer behind.
+        // Do not hide the native HWND inside its WM_CLOSE dispatch. Keep it
+        // alive until the next Slint event-loop turn, then hide the component
+        // explicitly so its visible-window keepalive is released before asking
+        // Winit to terminate. This preserves the normal worker-drain and final
+        // config flush after ComponentHandle::run() returns.
         let quit_paths = close_paths.clone();
+        let quit_ui = close_quit_ui.clone();
         close_quit_timer_callback.start(
             TimerMode::SingleShot,
             Duration::from_millis(25),
             move || {
                 trace_settings(&quit_paths, "window close: deferred quit timer fired");
+                match quit_ui.upgrade() {
+                    Some(ui) => match ui.hide() {
+                        Ok(()) => trace_settings(
+                            &quit_paths,
+                            "window close: Settings component hidden",
+                        ),
+                        Err(error) => trace_settings(
+                            &quit_paths,
+                            &format!("window close: Settings hide failed: {error}"),
+                        ),
+                    },
+                    None => trace_settings(
+                        &quit_paths,
+                        "window close: Settings component already released",
+                    ),
+                }
                 match slint::quit_event_loop() {
                     Ok(()) => trace_settings(
                         &quit_paths,
@@ -871,7 +889,7 @@ fn run() -> Result<(), String> {
         );
         trace_settings(
             &close_paths,
-            "window close: deferred quit timer armed; keeping native window until event-loop exit",
+            "window close: deferred hide/quit timer armed",
         );
         slint::CloseRequestResponse::KeepWindowShown
     });
