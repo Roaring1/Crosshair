@@ -7,6 +7,10 @@ use slint::{
     VecModel,
 };
 use std::cell::RefCell;
+#[cfg(windows)]
+use std::fs::OpenOptions;
+#[cfg(windows)]
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 use std::rc::Rc;
@@ -17,11 +21,36 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+#[cfg(windows)]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 slint::include_modules!();
 
 const PREVIEW_SIZE: u32 = 240;
 const PREVIEW_SAFE_MARGIN: u32 = 12;
+
+#[cfg(windows)]
+fn trace_settings(paths: &AppPaths, message: &str) {
+    let Some(parent) = paths.log_file.parent() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(parent);
+    let Ok(mut log) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&paths.log_file)
+    else {
+        return;
+    };
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    let _ = writeln!(log, "[{timestamp}] settings: {message}");
+}
+
+#[cfg(not(windows))]
+fn trace_settings(_paths: &AppPaths, _message: &str) {}
 
 fn parse_color(value: &str) -> Option<[u8; 3]> {
     let clean = value.trim().strip_prefix('#').unwrap_or(value.trim());
@@ -535,7 +564,10 @@ impl SettingsWorker {
             .spawn(move || {
                 while let Ok(task) = receiver.recv() {
                     match task {
-                        SettingsTask::Shutdown => break,
+                        SettingsTask::Shutdown => {
+                            trace_settings(&paths, "I/O worker: shutdown task received");
+                            break;
+                        }
                         SettingsTask::Apply {
                             apply_id,
                             ui_id,
@@ -549,7 +581,9 @@ impl SettingsWorker {
                             }
 
                             worker_overlay_dirty.store(true, Ordering::Release);
+                            trace_settings(&paths, "I/O worker: applying overlay preview");
                             let notify_result = notify_overlay(&candidate, &paths);
+                            trace_settings(&paths, "I/O worker: overlay preview call returned");
                             if worker_apply_generation.load(Ordering::Acquire) != apply_id {
                                 continue;
                             }
@@ -786,6 +820,7 @@ fn enqueue_cli(
 
 fn run() -> Result<(), String> {
     let paths = AppPaths::discover().map_err(|error| error.to_string())?;
+    trace_settings(&paths, "startup: application paths discovered");
     let mut initial = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
     initial.normalize();
     let ui = SettingsWindow::new().map_err(|error| error.to_string())?;
@@ -800,13 +835,24 @@ fn run() -> Result<(), String> {
     // Slint hides the native window and destroys its X11/Wayland surface.
     let close_requested = ui_closing.clone();
     let close_timer = timer.clone();
+    let close_paths = paths.clone();
     ui.window().on_close_requested(move || {
+        trace_settings(&close_paths, "window close: on_close_requested callback entered");
         close_requested.store(true, Ordering::Release);
         close_timer.stop();
         // Keep the native surface alive until ComponentHandle::run() regains
         // control and hides it after the event loop has stopped. Hiding it
         // inside this close event races Slint's deferred window properties.
-        let _ = slint::quit_event_loop();
+        match slint::quit_event_loop() {
+            Ok(()) => trace_settings(
+                &close_paths,
+                "window close: Slint event-loop quit scheduled",
+            ),
+            Err(error) => trace_settings(
+                &close_paths,
+                &format!("window close: could not schedule event-loop quit: {error}"),
+            ),
+        }
         slint::CloseRequestResponse::KeepWindowShown
     });
 
@@ -1119,9 +1165,13 @@ fn run() -> Result<(), String> {
 
     // The Settings process is intentionally separate from the overlay daemon.
     // Closing this window ends this process; an active overlay keeps running.
+    trace_settings(&paths, "UI event loop: entering");
     let run_result = ui.run().map_err(|error| error.to_string());
+    trace_settings(&paths, "UI event loop: returned");
     ui_closing.store(true, Ordering::Release);
+    trace_settings(&paths, "worker shutdown: sending shutdown and joining I/O thread");
     let (overlay_dirty, uninstalled) = worker.stop()?;
+    trace_settings(&paths, "worker shutdown: I/O thread joined");
     run_result?;
 
     // A user can close the window during the 75 ms coalescing delay. Flush the
