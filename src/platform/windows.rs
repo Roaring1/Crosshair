@@ -1107,7 +1107,10 @@ pub fn run(config: Config, paths: AppPaths) -> Result<(), String> {
     }
     trace(
         &paths,
-        &format!("daemon startup: initial overlay windows ready ({})", windows.len()),
+        &format!(
+            "daemon startup: initial overlay windows ready ({})",
+            windows.len()
+        ),
     );
 
     trace(&paths, "daemon startup: creating named pipe");
