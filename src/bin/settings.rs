@@ -856,10 +856,7 @@ fn run() -> Result<(), String> {
             TimerMode::SingleShot,
             Duration::from_millis(25),
             move || {
-                trace_settings(
-                    &quit_paths,
-                    "window close: deferred quit timer fired",
-                );
+                trace_settings(&quit_paths, "window close: deferred quit timer fired");
                 match slint::quit_event_loop() {
                     Ok(()) => trace_settings(
                         &quit_paths,
