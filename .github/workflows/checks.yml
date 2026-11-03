@@ -1,11 +1,19 @@
 name: Crosshair checks
 
 on:
+  # rust-port is validated through its open pull request; running both push
+  # and pull_request events for every commit only duplicated the full matrix.
   push:
-    branches: [main, rust-port]
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
+
+# Keep only the newest validation for a given source branch. A pull-request
+# update supersedes an older queued run instead of building a stale backlog.
+concurrency:
+  group: crosshair-${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
