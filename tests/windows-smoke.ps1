@@ -99,8 +99,16 @@ try {
     }
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($StartMenuShortcut)
-    if ($shortcut.TargetPath -ne $Settings -or $shortcut.Arguments -ne "") {
-        throw "Start Menu shortcut does not target the native Settings executable."
+    $actualShortcutTarget = [IO.Path]::GetFullPath(([string]$shortcut.TargetPath).Replace("/", "\\"))
+    $expectedShortcutTarget = [IO.Path]::GetFullPath(([string]$Settings).Replace("/", "\\"))
+    $shortcutTargetMatches = [string]::Equals(
+        $actualShortcutTarget,
+        $expectedShortcutTarget,
+        [StringComparison]::OrdinalIgnoreCase
+    )
+    $shortcutArguments = [string]$shortcut.Arguments
+    if (-not $shortcutTargetMatches -or -not [string]::IsNullOrEmpty($shortcutArguments)) {
+        throw ("Start Menu shortcut target mismatch. Actual: '$actualShortcutTarget'; expected: '$expectedShortcutTarget'; arguments: '$shortcutArguments'.")
     }
 
     Write-Host "[2/9] real monitor discovery and opt-in autostart registry control"
