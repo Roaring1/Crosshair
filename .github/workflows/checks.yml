@@ -99,7 +99,9 @@ jobs:
             python3-cairo \
             xvfb \
             xdotool \
-            x11-utils
+            x11-utils \
+            imagemagick \
+            x11-xserver-utils
 
       - name: Set up stable Rust
         run: |
