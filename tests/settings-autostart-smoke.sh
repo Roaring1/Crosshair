@@ -58,7 +58,7 @@ done
 test -n "$WINDOW"
 
 echo "[2] expand General startup controls and click Install"
-xdotool mousemove --window "$WINDOW" 515 187 click 1
+xdotool mousemove --window "$WINDOW" 589 207 click 1
 sleep 0.45
 xdotool mousemove --window "$WINDOW" 140 398 click 1
 for _ in $(seq 1 80); do
