@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use crosshair_core::render::{Raster, render_crosshair};
 use crosshair_core::{AppPaths, Config, MonitorDescriptor};
 use slint::{
