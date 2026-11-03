@@ -68,9 +68,17 @@ function Invoke-Crosshair {
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
     if (-not $process.WaitForExit($TimeoutMilliseconds)) {
-        try { $process.Kill($true) } catch {}
-        try { $process.WaitForExit(2000) | Out-Null } catch {}
-        Write-SmokeLog ("CLI TIMEOUT: " + $label + " exceeded " + $TimeoutMilliseconds + " ms; process tree termination was requested.")
+        # Avoid Process.Kill(true) and WaitForExit after a timeout: on Windows
+        # they can block while child processes still own inherited handles.
+        # Stop only this CLI PID; the test's finally block separately stops
+        # the isolated daemon and Settings process by their exact install path.
+        Write-SmokeLog ("CLI TIMEOUT: " + $label + " exceeded " + $TimeoutMilliseconds + " ms; terminating CLI PID " + $process.Id + ".")
+        try {
+            Stop-Process -Id $process.Id -Force -ErrorAction Stop
+            Write-SmokeLog ("CLI process " + $process.Id + " termination requested.")
+        } catch {
+            Write-SmokeLog ("CLI process termination request failed: " + $_.Exception.Message)
+        }
         if ($stdoutTask.IsCompleted) {
             try {
                 $timeoutStdout = $stdoutTask.GetAwaiter().GetResult()
