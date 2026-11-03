@@ -89,23 +89,33 @@ echo "[2/5] Open Appearance"
 click_at 315 24
 capture "02-appearance-top"
 
-echo "[3/5] Open the main color palette"
-# The main color swatch sits in the first color row in the left Appearance pane.
+echo "[3/6] Open the main color palette"
+# Main color swatch: left pane, Color row.
 click_at 122 300
 capture "03-color-picker"
 
-echo "[4/5] Dismiss the palette and inspect the lower scrolling content"
-click_at 560 360
+echo "[4/6] Select a preset and verify that it persists"
+# Row 2, column 4 of the palette is #0ea5e9.
+click_at 204 380
+sleep 0.8
+capture "04-color-selected"
+grep -qi '#0ea5e9' "$XDG_CONFIG_HOME/crosshair/config.json"
+
+echo "[5/6] Scroll the Appearance pane to its lower controls"
 xdotool mousemove --sync "$((X + 280))" "$((Y + 420))"
 xdotool click --repeat 7 --delay 45 5
-sleep 0.4
-capture "04-appearance-lower"
+sleep 0.5
+capture "05-appearance-lower"
+if cmp -s "$OUT/04-color-selected.png" "$OUT/05-appearance-lower.png"; then
+    echo "Appearance ScrollView did not move when the wheel was used" >&2
+    exit 1
+fi
 
-echo "[5/5] Return to the top to capture the full control layout"
+echo "[6/6] Return to the top to capture the full control layout"
 xdotool mousemove --sync "$((X + 280))" "$((Y + 420))"
 xdotool click --repeat 7 --delay 45 4
-sleep 0.4
-capture "05-appearance-top-again"
+sleep 0.5
+capture "06-appearance-top-again"
 
 xdotool windowclose "$WINDOW"
 for _ in $(seq 1 100); do
