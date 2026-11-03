@@ -863,7 +863,7 @@ fn run() -> Result<(), String> {
                     Some(ui) => match ui.hide() {
                         Ok(()) => {
                             trace_settings(&quit_paths, "window close: Settings component hidden")
-                        },
+                        }
                         Err(error) => trace_settings(
                             &quit_paths,
                             &format!("window close: Settings hide failed: {error}"),
