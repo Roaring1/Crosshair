@@ -90,8 +90,13 @@ if (-not $NoPathUpdate) {
 # Preserve a previous explicit login-startup choice, but never enable it
 # on a fresh install.
 if ($HadAutostart) {
-    New-Item -Path $RunKey -Force | Out-Null
-    Set-ItemProperty -LiteralPath $RunKey -Name "Crosshair" -Value ('"' + $InstalledCli + '" --daemon --no-ui')
+    # Recreate the previous opt-in preference through the native CLI so the
+    # registry receives the current hidden PowerShell launcher, not the old
+    # direct console-subsystem command.
+    & $InstalledCli --autostart
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not migrate the previous Crosshair login-startup preference."
+    }
 }
 
 Write-Host "Crosshair 4.0.0 installed to $InstallDir"
