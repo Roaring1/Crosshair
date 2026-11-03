@@ -91,7 +91,7 @@ capture "02-appearance-top"
 
 echo "[3/5] Open the main color palette"
 # The main color swatch sits in the first color row in the left Appearance pane.
-click_at 122 250
+click_at 122 300
 capture "03-color-picker"
 
 echo "[4/5] Dismiss the palette and inspect the lower scrolling content"
