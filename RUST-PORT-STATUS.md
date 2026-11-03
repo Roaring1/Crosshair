@@ -1,6 +1,26 @@
 # Native Rust port status
 
-_Last reviewed: 2026-11-02_
+_Last reviewed: 2026-11-03_
+
+## Update — 2026-11-03: NobaraPC Rust deployment
+
+The Rust Linux build is now installed as the active NobaraPC application:
+
+- Built the Rust CLI and Slint Settings executable with `cargo build --locked --release --features settings-ui --bins`.
+- Installed through the native Rust `--autostart` path into `~/.local/bin`. The installed `crosshair` and `crosshair-settings` hashes exactly match the freshly built `target/release` binaries.
+- Preserved the existing explicit login-autostart choice. The XDG entry starts the installed Rust daemon with `--daemon --no-ui`; the current saved config remains disabled, so it does not display an overlay unless enabled.
+- Ran `tests/settings-screenshots.sh` against the installed binaries under a private 1280x900 Xvfb display. All seven captures completed; the script reported PASS after checking palette persistence, Appearance scrolling and clean Settings exit. No interactive desktop window was opened.
+- Removed the installed Python-only Crosshair launcher, Python app directory, fallback desktop entry and stale Python launcher shim. Shared system Python 3.14.4 was intentionally retained for other system/developer tools. The Python baseline source in the Git checkout remains for CI and Python/Cairo renderer comparison; it is not an installed Crosshair launcher.
+- Existing user configuration under `~/.config/crosshair` was hash-checked before and after cleanup and remained unchanged. Crosshair logs/state were retained. The previous installed Rust binaries and desktop entries are saved in a private rollback snapshot under `~/.local/state/crosshair/installer-backups/`.
+- Post-install verification reports Crosshair 4.0.0, with no daemon running and the saved overlay setting disabled. The new installation has not yet been exercised in an active KDE Wayland session or a game.
+
+## Update — 2026-11-03: Windows validation status
+
+- Actions run #145 passed the full Linux Rust job, five Python test/lint jobs and the dependency audit. The Linux job included optimized build/install tests, X11 click-through, Settings lifecycle/IPC regressions and the seven-screen screenshot artifact.
+- On Windows, formatting, native Rust tests and the optimized build passed, but the smoke test failed at its opt-in Run-key assertion because the test compared equivalent paths using different slash conventions. The preceding installer migration and Start Menu shortcut assertions passed.
+- The current branch includes normalized Run-key path comparison and a deferred uninstaller that executes from the system temporary directory, plus a smoke test that calls the installed CLI's own `--uninstall` action from the installation directory. These latest changes still require a fresh Windows run before the package is considered validated.
+
+
 
 ## Release and branch relationship
 
@@ -55,10 +75,10 @@ Local Rust formatting and MSVC-target checks were unavailable on the development
 
 ## Release gates still open
 
-1. Complete the current GitHub Actions run, including Windows-native compile, tests and the Windows install/overlay/Settings/uninstall smoke test.
-2. Inspect the uploaded Linux Settings screenshots and Windows x64 package artifacts from CI.
+1. Run the full Windows-native compile, tests and install/overlay/Settings/uninstall smoke against the latest branch head; produce and inspect the Windows x64 package artifact.
+2. Verify the Windows x64 package on the user's Windows laptop before removing the draft/release warning.
 3. Validate on a real Nobara/KDE Wayland session: overlay placement, click-through, fullscreen behavior, DPI and multi-monitor transitions, and Settings close/reopen behavior.
-4. Recheck monitor selection and config migration against the established application. Keep the Python baseline and configuration recoverable until this is done.
+4. Recheck monitor selection and config migration against the established application. Keep the Git Python baseline and user configuration recoverable until this is done.
 5. Decide separately whether tray parity is required for the first Rust release; it is a known gap, not a completed feature.
 
 Until those checks pass, keep PR #3 in draft and do not label the Rust rewrite a stable replacement.
