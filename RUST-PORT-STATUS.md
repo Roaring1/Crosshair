@@ -2,21 +2,21 @@
 
 ## Latest checkpoint — 2026-11-03
 
-The current PR source head is `12083973ee15da0a1216f11b1b2d5231f73ee3c1` on `rust-port` (documentation follow-up). It contains the Windows Settings shutdown fix (`e8dabff`), desktop accent integration (`9ce53cf`), and rustfmt correction (`59e4ee8`). PR #3 remains draft.
+The tested executable-code checkpoint is `12083973ee15da0a1216f11b1b2d5231f73ee3c1`, containing the Windows Settings shutdown fix (`e8dabff`), desktop accent integration (`9ce53cf`), and rustfmt correction (`59e4ee8`). PR head `229e45099afbc56f205547513291f4b578667668` then updated this report only. Full CI run #184 on that head completed green. PR #3 remains draft.
 
 ### Hosted validation
 
-- GitHub Actions run [#183](https://github.com/Roaring1/Crosshair/actions/runs/41724916586) completed fully green on the exact current head: Rust Linux, Rust Windows-native build/tests/full installer-overlay-named-pipe-Settings-close-uninstall smoke, Python 3.10–3.14, and dependency vulnerability audit.
+- GitHub Actions run [#184](https://github.com/Roaring1/Crosshair/actions/runs/41728990995) completed fully green on the exact current head: Rust Linux, Rust Windows-native build/tests/full installer-overlay-named-pipe-Settings-close-uninstall smoke, Python 3.10–3.14, and dependency vulnerability audit.
 - The Windows smoke log confirms all nine lifecycle stages completed, including per-user install, active monitor discovery, named-pipe updates, layered overlay startup, Settings close after WM_CLOSE, autostart toggling, hide/toggle-off, and deferred uninstall. Settings exited after WM_CLOSE; the CLI and deferred uninstaller completed.
-- The Windows artifact is `Crosshair-Windows-x64.zip` from run #183. SHA-256: `ad16130d34d68af74f195032db8f893276be15778dc50f8600257ce59376bf42`. It was transferred to the laptop and the received ZIP hash matched exactly.
+- The final Windows artifact is `Crosshair-Windows-x64.zip` from run #184. SHA-256: `29d0336eef9bedafc6859f6a68570345e9b78e3e44823fe0eaed45c64ba94c93`. It was transferred to the laptop and the received ZIP hash matched exactly.
 - Local checks on the same source: `cargo check --locked --features settings-ui --all-targets` passed; all 56 Rust tests passed (32 core/renderer/IPC, 18 Linux backend, 6 Settings); optimized Linux CLI and Settings binaries built successfully. Four Settings tests cover KDE accent precedence/fallback/section parsing/malformed input.
 
 ### Windows 11 laptop — physical desktop
 
-- Installed the run #183 package into `%LOCALAPPDATA%\Programs\Crosshair` with the per-user installer. Installed CLI SHA-256: `0AEE2EC2DD0B67A64C0D99EA7E54C2FCA6C7551AAFA58AC970CAEA17BE3B06C3`. Installed Settings SHA-256: `657CD44656FD98929484121C7D4BD13E49E26912B8058776779DCD87DD05F4DB`.
+- Installed the run #184 package into `%LOCALAPPDATA%\Programs\Crosshair` with the per-user installer. Installed CLI SHA-256: `AFE769523C41199DEF5168D442C3F72B7CF7A10754DAA7C0DBA465E8D5E0F73A`. Installed Settings SHA-256: `5BC2756FDE850D4D0D274EE403E933A5CD17171EAE1307F103E1ACD73763850E`.
 - The existing configuration was preserved byte-for-byte: SHA-256 `1F61272337DE3F4FEFF56B7B3FA41CE4A2A2155BD925EBC1ABA6FFCF6C0AB90B`; `enabled=false`, `auto_save=true`. Login autostart remains absent. The installer updated PATH and the Start Menu shortcut; it did not remove Python files.
 - In the actual interactive desktop session (Session 1), the installed Settings UI opened, the visible `Crosshair Settings` window received WM_CLOSE, and the process exited naturally with code 0. The application trace shows the Slint event loop returned and the I/O worker was joined; no forced process termination was needed.
-- A separate physical-session show/hide check found one visible 17×17 overlay HWND on the active 1920×1080 desktop. Its extended styles included `WS_EX_LAYERED`, `WS_EX_TRANSPARENT`, `WS_EX_TOPMOST` and `WS_EX_NOACTIVATE`. The daemon exited after `--hide`.
+- Against the final run #184 binaries, a physical-session show/hide check found one visible 17×17 overlay HWND on the active 1920×1080 desktop. Its extended styles included `WS_EX_LAYERED`, `WS_EX_TRANSPARENT`, `WS_EX_TOPMOST` and `WS_EX_NOACTIVATE`. The daemon exited after `--hide`.
 - The final Windows Settings screenshot was captured from the installed build. The DWM colorization value is `0xC4E90082`; the primary saturated accent in the actual widget screenshot is `#e90082`, confirming the Slint standard controls follow the Windows system accent. `AccentColor` is separately reported by DWM as `0xFF8200E9`; Slint's rendered widget color matched `ColorizationColor`.
 - Final laptop state: no Crosshair process, no temporary scheduled task, no Run-key autostart, and the saved overlay configuration remains disabled. Only one active logical display (1920×1080) was available in this test. Multi-monitor attach/detach, mixed/fractional DPI and fullscreen-game behavior are not yet verified.
 
