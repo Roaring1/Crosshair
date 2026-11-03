@@ -33,36 +33,426 @@ component ColorField inherits HorizontalLayout {
                 }
 
                 GridLayout {
-                    columns: 6;
+                    width: 100%;
                     spacing: 5px;
-
-                    Rectangle { width: 23px; height: 23px; background: #ef4444; border-radius: 4px; TouchArea { clicked => { root.value = "#ef4444"; root.committed(); color-palette.close(); } } }
-                    Rectangle { width: 23px; height: 23px; background: #f97316; border-radius: 4px; TouchArea { clicked => { root.value = "#f97316"; root.committed(); color-palette.close(); } } }
-                    Rectangle { width: 23px; height: 23px; background: #f59e0b; border-radius: 4px; TouchArea { clicked => { root.value = "#f59e0b"; root.committed(); color-palette.close(); } } }
-                    Rectangle { width: 23px; height: 23px; background: #eab308; border-radius: 4px; TouchArea { clicked => { root.value = "#eab308"; root.committed(); color-palette.close(); } } }
-                    Rectangle { width: 23px; height: 23px; background: #84cc16; border-radius: 4px; TouchArea { clicked => { root.value = "#84cc16"; root.committed(); color-palette.close(); } } }
-                    Rectangle { width: 23px; height: 23px; background: #22c55e; border-radius: 4px; TouchArea { clicked => { root.value = "#22c55e"; root.committed(); color-palette.close(); } } }
-
-                    Rectangle { width: 23px; height: 23px; background: #10b981; border-radius: 4px; TouchArea { clicked => { root.value = "#10b981"; root.committed(); color-palette.close(); } } }
-                    Rectangle { width: 23px; height: 23px; background: #14b8a6; border-radius: 4px; TouchArea { clicked => { root.value = "#14b8a6"; root.committed(); color-palette.close(); } } }
-                    Rectangle { width: 23px; height: 23px; background: #06b6d4; border-radius: 4px; TouchArea { clicked => { root.value = "#06b6d4"; root.committed(); color-palette.close(); } } }
-                    Rectangle { width: 23px; height: 23px; background: #0ea5e9; border-radius: 4px; TouchArea { clicked => { root.value = "#0ea5e9"; root.committed(); color-palette.close(); } } }
-                    Rectangle { width: 23px; height: 23px; background: #3b82f6; border-radius: 4px; TouchArea { clicked => { root.value = "#3b82f6"; root.committed(); color-palette.close(); } } }
-                    Rectangle { width: 23px; height: 23px; background: #6366f1; border-radius: 4px; TouchArea { clicked => { root.value = "#6366f1"; root.committed(); color-palette.close(); } } }
-
-                    Rectangle { width: 23px; height: 23px; background: #8b5cf6; border-radius: 4px; TouchArea { clicked => { root.value = "#8b5cf6"; root.committed(); color-palette.close(); } } }
-                    Rectangle { width: 23px; height: 23px; background: #a855f7; border-radius: 4px; TouchArea { clicked => { root.value = "#a855f7"; root.committed(); color-palette.close(); } } }
-                    Rectangle { width: 23px; height: 23px; background: #d946ef; border-radius: 4px; TouchArea { clicked => { root.value = "#d946ef"; root.committed(); color-palette.close(); } } }
-                    Rectangle { width: 23px; height: 23px; background: #ec4899; border-radius: 4px; TouchArea { clicked => { root.value = "#ec4899"; root.committed(); color-palette.close(); } } }
-                    Rectangle { width: 23px; height: 23px; background: #f43f5e; border-radius: 4px; TouchArea { clicked => { root.value = "#f43f5e"; root.committed(); color-palette.close(); } } }
-                    Rectangle { width: 23px; height: 23px; background: #ffffff; border-color: Palette.border; border-width: 1px; border-radius: 4px; TouchArea { clicked => { root.value = "#ffffff"; root.committed(); color-palette.close(); } } }
-
-                    Rectangle { width: 23px; height: 23px; background: #000000; border-color: Palette.border; border-width: 1px; border-radius: 4px; TouchArea { clicked => { root.value = "#000000"; root.committed(); color-palette.close(); } } }
-                    Rectangle { width: 23px; height: 23px; background: #1e293b; border-radius: 4px; TouchArea { clicked => { root.value = "#1e293b"; root.committed(); color-palette.close(); } } }
-                    Rectangle { width: 23px; height: 23px; background: #334155; border-radius: 4px; TouchArea { clicked => { root.value = "#334155"; root.committed(); color-palette.close(); } } }
-                    Rectangle { width: 23px; height: 23px; background: #64748b; border-radius: 4px; TouchArea { clicked => { root.value = "#64748b"; root.committed(); color-palette.close(); } } }
-                    Rectangle { width: 23px; height: 23px; background: #94a3b8; border-radius: 4px; TouchArea { clicked => { root.value = "#94a3b8"; root.committed(); color-palette.close(); } } }
-                    Rectangle { width: 23px; height: 23px; background: #cbd5e1; border-radius: 4px; TouchArea { clicked => { root.value = "#cbd5e1"; root.committed(); color-palette.close(); } } }
+                Row {
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #ef4444;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#ef4444";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #f97316;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#f97316";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #f59e0b;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#f59e0b";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #eab308;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#eab308";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #84cc16;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#84cc16";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #22c55e;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#22c55e";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                }
+                Row {
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #10b981;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#10b981";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #14b8a6;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#14b8a6";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #06b6d4;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#06b6d4";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #0ea5e9;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#0ea5e9";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #3b82f6;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#3b82f6";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #6366f1;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#6366f1";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                }
+                Row {
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #8b5cf6;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#8b5cf6";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #a855f7;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#a855f7";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #d946ef;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#d946ef";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #ec4899;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#ec4899";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #f43f5e;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#f43f5e";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #ffffff;
+                        border-color: Palette.border;
+                        border-width: 1px;
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#ffffff";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                }
+                Row {
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #000000;
+                        border-color: Palette.border;
+                        border-width: 1px;
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#000000";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #1e293b;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#1e293b";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #334155;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#334155";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #64748b;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#64748b";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #94a3b8;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#94a3b8";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 23px;
+                        height: 23px;
+                        background: #cbd5e1;
+                        
+                        border-radius: 4px;
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value = "#cbd5e1";
+                                root.committed();
+                                color-palette.close();
+                            }
+                        }
+                    }
+                }
                 }
 
                 Text {
