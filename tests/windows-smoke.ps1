@@ -37,10 +37,47 @@ $ConfigPath = Join-Path $env:APPDATA "Crosshair\config.json"
 if (-not ("CrosshairSmokeNative" -as [type])) {
     Add-Type -TypeDefinition @"
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
 public static class CrosshairSmokeNative {
-    [DllImport("user32.dll", SetLastError = true)]
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll", EntryPoint = "PostMessageW", SetLastError = true)]
     public static extern bool PostMessage(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", EntryPoint = "EnumWindows", SetLastError = true)]
+    public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+    [DllImport("user32.dll", EntryPoint = "GetWindowThreadProcessId", SetLastError = true)]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+    [DllImport("user32.dll", EntryPoint = "IsWindowVisible")]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll", EntryPoint = "GetClassNameW", CharSet = CharSet.Unicode)]
+    public static extern int GetClassName(IntPtr hWnd, StringBuilder className, int maxCount);
+    [DllImport("user32.dll", EntryPoint = "GetWindowTextW", CharSet = CharSet.Unicode)]
+    public static extern int GetWindowText(IntPtr hWnd, StringBuilder title, int maxCount);
+
+    public static string DescribeWindow(IntPtr hWnd) {
+        StringBuilder className = new StringBuilder(256);
+        StringBuilder title = new StringBuilder(256);
+        GetClassName(hWnd, className, className.Capacity);
+        GetWindowText(hWnd, title, title.Capacity);
+        return "class='" + className.ToString() + "' title='" + title.ToString() +
+               "' visible=" + IsWindowVisible(hWnd).ToString();
+    }
+
+    public static IntPtr[] FindTopLevelWindowsForProcess(int processId) {
+        List<IntPtr> handles = new List<IntPtr>();
+        EnumWindowsProc callback = delegate(IntPtr hWnd, IntPtr lParam) {
+            uint ownerProcessId;
+            GetWindowThreadProcessId(hWnd, out ownerProcessId);
+            if (ownerProcessId == (uint)processId) {
+                handles.Add(hWnd);
+            }
+            return true;
+        };
+        EnumWindows(callback, IntPtr.Zero);
+        GC.KeepAlive(callback);
+        return handles.ToArray();
+    }
 }
 "@
 }
@@ -311,16 +348,51 @@ try {
     }
 
     Write-SmokeLog "[6/9] close Settings and verify overlay lifetime is independent"
-    $settingsHwnd = [IntPtr]$settingsProcess.MainWindowHandle
-    Write-SmokeLog ("Posting asynchronous WM_CLOSE to Settings pid=" + $settingsProcess.Id + "; hwnd=" + $settingsHwnd)
-    $closeSent = [CrosshairSmokeNative]::PostMessage($settingsHwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
-    Write-SmokeLog ("Settings WM_CLOSE queued: " + $closeSent)
-    if (-not $closeSent) {
-        throw ("Could not post WM_CLOSE to Settings (Win32 error " + [Runtime.InteropServices.Marshal]::GetLastWin32Error() + ").")
+    $settingsHwnds = @([CrosshairSmokeNative]::FindTopLevelWindowsForProcess($settingsProcess.Id))
+    if ($settingsHwnds.Count -eq 0 -and $settingsProcess.MainWindowHandle -ne 0) {
+        $settingsHwnds = @([IntPtr]$settingsProcess.MainWindowHandle)
     }
-    if (-not (Wait-ForProcessExit -Process $settingsProcess -TimeoutMilliseconds 8000)) {
+    Write-SmokeLog ("Settings top-level HWNDs for pid " + $settingsProcess.Id + ": " + ($settingsHwnds -join ", "))
+    foreach ($settingsHwnd in $settingsHwnds) {
+        Write-SmokeLog ("Settings HWND " + $settingsHwnd + " " + [CrosshairSmokeNative]::DescribeWindow([IntPtr]$settingsHwnd))
+    }
+    $postedHwnds = @{}
+    foreach ($settingsHwnd in $settingsHwnds) {
+        $posted = [CrosshairSmokeNative]::PostMessage([IntPtr]$settingsHwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+        $postedHwnds[$settingsHwnd.ToInt64().ToString()] = $true
+        Write-SmokeLog ("Settings WM_CLOSE queued: hwnd=" + $settingsHwnd + "; success=" + $posted)
+    }
+    if ($postedHwnds.Count -eq 0) {
+        throw ("No top-level Settings window was found for pid " + $settingsProcess.Id + ".")
+    }
+
+    $closeWatch = [Diagnostics.Stopwatch]::StartNew()
+    $lastCloseRetry = 0
+    $closeCallbackSeen = $false
+    $daemonLog = Join-Path $env:LOCALAPPDATA "Crosshair\crosshair.log"
+    while (-not $settingsProcess.HasExited -and $closeWatch.ElapsedMilliseconds -lt 8000) {
+        if (-not $closeCallbackSeen -and (Test-Path -LiteralPath $daemonLog -PathType Leaf)) {
+            $closeCallbackSeen = Select-String -LiteralPath $daemonLog -SimpleMatch "window close: on_close_requested callback entered" -Quiet
+        }
+        if (-not $closeCallbackSeen -and $closeWatch.ElapsedMilliseconds -ge ($lastCloseRetry + 1500)) {
+            $settingsProcess.Refresh()
+            $currentHwnds = @([CrosshairSmokeNative]::FindTopLevelWindowsForProcess($settingsProcess.Id))
+            if ($currentHwnds.Count -eq 0 -and $settingsProcess.MainWindowHandle -ne 0) {
+                $currentHwnds = @([IntPtr]$settingsProcess.MainWindowHandle)
+            }
+            foreach ($currentHwnd in $currentHwnds) {
+                $currentKey = $currentHwnd.ToInt64().ToString()
+                $posted = [CrosshairSmokeNative]::PostMessage([IntPtr]$currentHwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+                $postedHwnds[$currentKey] = $true
+                Write-SmokeLog ("Settings WM_CLOSE retry: hwnd=" + $currentHwnd + "; success=" + $posted + "; " + [CrosshairSmokeNative]::DescribeWindow([IntPtr]$currentHwnd) + "; callbackSeen=" + $closeCallbackSeen)
+            }
+            $lastCloseRetry = $closeWatch.ElapsedMilliseconds
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not (Wait-ForProcessExit -Process $settingsProcess -TimeoutMilliseconds 250)) {
         $settingsProcess.Refresh()
-        Write-SmokeLog ("Settings close timeout: pid=" + $settingsProcess.Id + "; hasExited=" + $settingsProcess.HasExited + "; hwnd=" + $settingsProcess.MainWindowHandle)
+        Write-SmokeLog ("Settings close timeout: pid=" + $settingsProcess.Id + "; hasExited=" + $settingsProcess.HasExited + "; hwnd=" + $settingsProcess.MainWindowHandle + "; callbackSeen=" + $closeCallbackSeen)
         $daemonLog = Join-Path $env:LOCALAPPDATA "Crosshair\crosshair.log"
         if (Test-Path -LiteralPath $daemonLog -PathType Leaf) {
             Write-SmokeLog "Captured Crosshair and Settings lifecycle diagnostics:"
