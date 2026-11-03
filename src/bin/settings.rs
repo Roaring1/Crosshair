@@ -360,8 +360,26 @@ fn notify_overlay(config: &Config, paths: &AppPaths) -> Result<(), String> {
 
 #[cfg(windows)]
 fn notify_overlay(config: &Config, paths: &AppPaths) -> Result<(), String> {
-    let _ = (config, paths);
-    Err("Windows named-pipe control is not yet enabled in this build".into())
+    let payload = serde_json::to_value(config).map_err(|error| error.to_string())?;
+    match crosshair_core::windows::send_command(paths, "preview", Some(payload.clone())) {
+        Ok(_) => Ok(()),
+        Err(error) if config.enabled => {
+            start_overlay(paths, true)?;
+            for _ in 0..80 {
+                thread::sleep(Duration::from_millis(25));
+                if crosshair_core::windows::send_command(paths, "preview", Some(payload.clone()))
+                    .is_ok()
+                {
+                    return Ok(());
+                }
+            }
+            Err(format!(
+                "Could not contact the Windows overlay after starting it: {error}"
+            ))
+        }
+        Err(error) if !config.enabled && error.contains("not running") => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn run_cli_action(action: &str) -> Result<String, String> {
@@ -396,7 +414,7 @@ fn run_cli_action(action: &str) -> Result<String, String> {
     Ok(if !stdout.is_empty() { stdout } else { stderr })
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn start_overlay(paths: &AppPaths, show: bool) -> Result<(), String> {
     let current = std::env::current_exe().map_err(|error| error.to_string())?;
     let name = if cfg!(windows) {
