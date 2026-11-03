@@ -12,7 +12,9 @@ foreach ($path in @($SourceCli, $SourceSettings, $InstallScript, $UninstallScrip
     }
 }
 
-$Root = Join-Path $env:TEMP ("crosshair-windows-smoke-" + [guid]::NewGuid().ToString("N"))
+$RunId = [guid]::NewGuid().ToString("N")
+$Root = Join-Path $env:TEMP ("crosshair-windows-smoke-" + $RunId)
+$DiagnosticLog = Join-Path $env:TEMP ("crosshair-windows-smoke-" + $RunId + ".log")
 $env:APPDATA = Join-Path $Root "roaming"
 $env:LOCALAPPDATA = Join-Path $Root "local"
 $Package = Join-Path $Root "package"
@@ -31,13 +33,25 @@ $StartMenuShortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Progra
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $ConfigPath = Join-Path $env:APPDATA "Crosshair\config.json"
 
+function Write-SmokeLog {
+    param([Parameter(Mandatory = $true)][string] $Message)
+    $line = "[{0:O}] {1}" -f [DateTime]::UtcNow, $Message
+    Add-Content -LiteralPath $DiagnosticLog -Value $line
+    Write-Host $line
+}
+
+Write-SmokeLog "Starting Windows installer/overlay/Settings/uninstall smoke test."
+
 function Invoke-Crosshair {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]] $Arguments)
+    $label = "crosshair " + ($Arguments -join " ")
+    Write-SmokeLog ("CLI START: " + $label)
     $output = & $Bin @Arguments 2>&1
     $exitCode = $LASTEXITCODE
     $text = ($output | ForEach-Object { "$_" }) -join [Environment]::NewLine
+    Write-SmokeLog ("CLI EXIT: " + $label + " (exit " + $exitCode + ")")
     if ($exitCode -ne 0) {
-        throw ("crosshair " + ($Arguments -join ' ') + " failed (" + $exitCode + "): " + $text)
+        throw ($label + " failed (" + $exitCode + "): " + $text)
     }
     return $text
 }
@@ -65,7 +79,15 @@ function Wait-ForStatus {
 
 function Stop-Crosshair {
     if (Test-Path -LiteralPath $Bin -PathType Leaf) {
-        try { & $Bin --quit *> $null } catch {}
+        try {
+            $quit = Start-Process -FilePath $Bin -ArgumentList "--quit" -WindowStyle Hidden -PassThru
+            if (-not $quit.WaitForExit(5000)) {
+                Write-SmokeLog "Cleanup: --quit did not return within five seconds; stopping its CLI process."
+                Stop-Process -Id $quit.Id -Force -ErrorAction SilentlyContinue
+            }
+        } catch {
+            Write-SmokeLog ("Cleanup: --quit request could not complete: " + $_.Exception.Message)
+        }
         Get-Process -Name "crosshair" -ErrorAction SilentlyContinue |
             Where-Object { $_.Path -eq $Bin } |
             Stop-Process -Force -ErrorAction SilentlyContinue
@@ -76,7 +98,7 @@ function Stop-Crosshair {
 }
 
 try {
-    Write-Host "[1/9] install the same per-user package intended for the laptop"
+    Write-SmokeLog "[1/9] install the same per-user package intended for the laptop"
     & (Join-Path $Package "Install-Crosshair.ps1")
     if ($LASTEXITCODE -ne 0) { throw "Windows installer script failed." }
     if (-not (Test-Path -LiteralPath $Bin -PathType Leaf) -or
@@ -111,7 +133,7 @@ try {
         throw ("Start Menu shortcut target mismatch. Actual: '$actualShortcutTarget'; expected: '$expectedShortcutTarget'; arguments: '$shortcutArguments'.")
     }
 
-    Write-Host "[2/9] real monitor discovery and opt-in autostart registry control"
+    Write-SmokeLog "[2/9] real monitor discovery and opt-in autostart registry control"
     $monitorJson = Invoke-Crosshair -Arguments @("--list-monitors")
     $monitors = $monitorJson | ConvertFrom-Json
     if (@($monitors).Count -lt 1) { throw "Windows reported no active monitors." }
@@ -137,7 +159,7 @@ try {
         throw "Remove autostart left a Crosshair Run registry value."
     }
 
-    Write-Host "[3/9] create isolated enabled config and cold-start overlay"
+    Write-SmokeLog "[3/9] create isolated enabled config and cold-start overlay"
     $null = Invoke-Crosshair -Arguments @("--set", '{"enabled":true,"shape":"dot","size":9}')
     $null = Invoke-Crosshair -Arguments @("--show")
     $status = Wait-ForStatus "Overlay: enabled"
@@ -145,7 +167,7 @@ try {
         throw "Overlay status did not report a running daemon: $status"
     }
 
-    Write-Host "[4/9] persisted settings update through named pipe"
+    Write-SmokeLog "[4/9] persisted settings update through named pipe"
     $null = Invoke-Crosshair -Arguments @("--set", '{"enabled":true,"shape":"cross","size":31,"opacity":0.72}')
     $saved = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
     if ($saved.shape -ne "cross" -or $saved.size -ne 31) {
@@ -153,7 +175,7 @@ try {
     }
     $status = Wait-ForStatus "Overlay: enabled"
 
-    Write-Host "[5/9] open Settings through the same command used by the Start Menu"
+    Write-SmokeLog "[5/9] open Settings through the same command used by the Start Menu"
     $before = @(Get-Process -Name "crosshair-settings" -ErrorAction SilentlyContinue |
         ForEach-Object { $_.Id })
     $null = Invoke-Crosshair -Arguments @("--config")
@@ -176,7 +198,7 @@ try {
         throw "The installed CLI did not open a visible sibling Settings window."
     }
 
-    Write-Host "[6/9] close Settings and verify overlay lifetime is independent"
+    Write-SmokeLog "[6/9] close Settings and verify overlay lifetime is independent"
     $null = $settingsProcess.CloseMainWindow()
     if (-not $settingsProcess.WaitForExit(8000)) {
         throw "Settings did not exit after its window-close request."
@@ -186,13 +208,13 @@ try {
         throw "Closing Settings unexpectedly stopped the overlay."
     }
 
-    Write-Host "[7/9] hide removes the overlay and exits daemon"
+    Write-SmokeLog "[7/9] hide removes the overlay and exits daemon"
     $null = Invoke-Crosshair -Arguments @("--hide")
     $status = Wait-ForStatus "Crosshair daemon: not running"
     $saved = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
     if ($saved.enabled) { throw "Hide did not persist enabled=false." }
 
-    Write-Host "[8/9] cold toggle starts, then toggle-off shuts down again"
+    Write-SmokeLog "[8/9] cold toggle starts, then toggle-off shuts down again"
     $null = Invoke-Crosshair -Arguments @("--toggle")
     $null = Wait-ForStatus "Overlay: enabled"
     $null = Invoke-Crosshair -Arguments @("--toggle")
@@ -201,11 +223,16 @@ try {
         throw "Toggle-off did not leave the overlay disabled: $status"
     }
 
-    Write-Host "[9/9] uninstall through the installed CLI from its own working directory"
-    $uninstallProcess = Start-Process -FilePath $Bin -ArgumentList "--uninstall" -WorkingDirectory $InstallDir -WindowStyle Hidden -Wait -PassThru
+    Write-SmokeLog "[9/9] uninstall through the installed CLI from its own working directory"
+    Write-SmokeLog "Launching --uninstall; the deferred helper must remove the install folder after the CLI exits."
+    $uninstallProcess = Start-Process -FilePath $Bin -ArgumentList "--uninstall" -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru
+    if (-not $uninstallProcess.WaitForExit(10000)) {
+        throw "The installed CLI did not return from --uninstall within ten seconds."
+    }
     if ($uninstallProcess.ExitCode -ne 0) {
         throw "The in-app uninstall command failed with exit code $($uninstallProcess.ExitCode)."
     }
+    Write-SmokeLog "The CLI exited; waiting up to 30 seconds for the deferred uninstaller."
     $uninstallDeadline = [DateTime]::UtcNow.AddSeconds(30)
     while ([DateTime]::UtcNow -lt $uninstallDeadline -and (Test-Path -LiteralPath $InstallDir)) {
         Start-Sleep -Milliseconds 100
@@ -221,13 +248,15 @@ try {
     if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
         throw "Uninstaller removed user configuration."
     }
-    Write-Host "PASS: Windows install, monitor discovery, named-pipe preview/set, layered overlay, Settings close, autostart toggle, hide/toggle-off, and uninstall."
+    Write-SmokeLog "PASS: Windows install, monitor discovery, named-pipe preview/set, layered overlay, Settings close, autostart toggle, hide/toggle-off, and uninstall."
 }
 finally {
+    Write-SmokeLog "Entering bounded test cleanup."
     Stop-Crosshair
     try { Remove-ItemProperty -LiteralPath $RunKey -Name "Crosshair" -ErrorAction SilentlyContinue } catch {}
     if (Test-Path -LiteralPath $Bin -PathType Leaf) {
-        & (Join-Path $Package "Uninstall-Crosshair.ps1") *> $null
+        Write-SmokeLog "The isolated installation remains; removing the temporary test root rather than invoking a second uninstaller."
     }
     Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue
+    Write-SmokeLog ("Cleanup finished. Diagnostic log: " + $DiagnosticLog)
 }

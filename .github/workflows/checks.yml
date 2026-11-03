@@ -198,7 +198,17 @@ jobs:
 
       - name: Exercise Windows installer, overlay, named pipe, Settings and shutdown
         shell: pwsh
+        timeout-minutes: 8
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File tests/windows-smoke.ps1
+
+      - name: Upload Windows smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: crosshair-windows-smoke-diagnostics
+          path: ${{ runner.temp }}/crosshair-windows-smoke-*.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Package Windows x64 installer
         shell: pwsh
