@@ -86,10 +86,13 @@ try {
     $version = Invoke-Crosshair -Arguments @("--version")
     if ($version -notmatch "Crosshair 4\.0\.0") { throw "Unexpected installed version: $version" }
     $migratedRun = (Get-ItemProperty -LiteralPath $RunKey -Name "Crosshair").Crosshair
-    if ($migratedRun -notmatch [regex]::Escape($Bin) -or
-        $migratedRun -notmatch "--daemon" -or
-        $migratedRun -notmatch "-WindowStyle Hidden") {
-        throw "Installer did not preserve and modernize the previous login-startup preference."
+    $normalizedRun = $migratedRun.Replace("/", "\")
+    $normalizedBin = $Bin.Replace("/", "\")
+    $pathMatches = $normalizedRun.IndexOf($normalizedBin, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    if (-not $pathMatches -or
+        $normalizedRun -notmatch "--daemon" -or
+        $normalizedRun -notmatch "-WindowStyle Hidden") {
+        throw ("Installer did not preserve and modernize the previous login-startup preference. Actual Run value: " + $migratedRun)
     }
     if (-not (Test-Path -LiteralPath $StartMenuShortcut -PathType Leaf)) {
         throw "Installer did not create the Start Menu shortcut."
