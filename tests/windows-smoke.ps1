@@ -109,14 +109,33 @@ function Invoke-Crosshair {
         $process.Dispose()
         throw ($label + " timed out after " + $TimeoutMilliseconds + " ms.")
     }
-    $process.WaitForExit()
-    $stdout = $stdoutTask.GetAwaiter().GetResult()
-    $stderr = $stderrTask.GetAwaiter().GetResult()
+    # WaitForExit(timeout) has already confirmed that the CLI process exited.
+    # Do not call the parameterless overload: it also waits for redirected
+    # stream readers, which can remain open while the detached daemon inherits
+    # an OS pipe handle.
     $exitCode = $process.ExitCode
+    Write-SmokeLog ("CLI PROCESS EXITED: " + $label + " (exit " + $exitCode + ")")
+    $stdout = ""
+    $stderr = ""
+    if ($stdoutTask.IsCompleted) {
+        try { $stdout = $stdoutTask.GetAwaiter().GetResult() } catch {}
+    } else {
+        Write-SmokeLog ("CLI stdout pipe remained open after " + $label + " exited; not waiting for detached descendants.")
+    }
+    if ($stderrTask.IsCompleted) {
+        try { $stderr = $stderrTask.GetAwaiter().GetResult() } catch {}
+    } else {
+        Write-SmokeLog ("CLI stderr pipe remained open after " + $label + " exited; not waiting for detached descendants.")
+    }
     $process.Dispose()
     $text = ($stdout + $stderr).Trim()
     Write-SmokeLog ("CLI EXIT: " + $label + " (exit " + $exitCode + ")")
     if ($exitCode -ne 0) {
+        $daemonLog = Join-Path $env:LOCALAPPDATA "Crosshair\crosshair.log"
+        if (Test-Path -LiteralPath $daemonLog -PathType Leaf) {
+            Write-SmokeLog "Captured Windows daemon diagnostic log after CLI failure:"
+            Get-Content -LiteralPath $daemonLog | ForEach-Object { Write-SmokeLog ("DAEMON: " + $_) }
+        }
         throw ($label + " failed (" + $exitCode + "): " + $text)
     }
     return $stdout
