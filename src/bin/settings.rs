@@ -398,8 +398,14 @@ fn run_cli_action(action: &str) -> Result<String, String> {
             executable.display()
         ));
     }
-    let output = Command::new(&executable)
-        .arg(action)
+    let mut command = Command::new(&executable);
+    command.arg(action);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    let output = command
         .output()
         .map_err(|error| format!("Could not run {action}: {error}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -436,6 +442,11 @@ fn start_overlay(paths: &AppPaths, show: bool) -> Result<(), String> {
         command.arg("--show");
     } else {
         command.arg("--daemon");
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     }
     command
         .stdin(std::process::Stdio::null())
