@@ -34,6 +34,17 @@ $StartMenuShortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Progra
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $ConfigPath = Join-Path $env:APPDATA "Crosshair\config.json"
 
+if (-not ("CrosshairSmokeNative" -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class CrosshairSmokeNative {
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool PostMessage(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
+}
+"@
+}
+
 function Write-SmokeLog {
     param([Parameter(Mandatory = $true)][string] $Message)
     $line = "[{0:O}] {1}" -f [DateTime]::UtcNow, $Message
@@ -300,8 +311,13 @@ try {
     }
 
     Write-SmokeLog "[6/9] close Settings and verify overlay lifetime is independent"
-    $closeSent = $settingsProcess.CloseMainWindow()
-    Write-SmokeLog ("Settings WM_CLOSE posted: " + $closeSent + "; pid=" + $settingsProcess.Id + "; hwnd=" + $settingsProcess.MainWindowHandle)
+    $settingsHwnd = [IntPtr]$settingsProcess.MainWindowHandle
+    Write-SmokeLog ("Posting asynchronous WM_CLOSE to Settings pid=" + $settingsProcess.Id + "; hwnd=" + $settingsHwnd)
+    $closeSent = [CrosshairSmokeNative]::PostMessage($settingsHwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+    Write-SmokeLog ("Settings WM_CLOSE queued: " + $closeSent)
+    if (-not $closeSent) {
+        throw ("Could not post WM_CLOSE to Settings (Win32 error " + [Runtime.InteropServices.Marshal]::GetLastWin32Error() + ").")
+    }
     if (-not (Wait-ForProcessExit -Process $settingsProcess -TimeoutMilliseconds 8000)) {
         $settingsProcess.Refresh()
         Write-SmokeLog ("Settings close timeout: pid=" + $settingsProcess.Id + "; hasExited=" + $settingsProcess.HasExited + "; hwnd=" + $settingsProcess.MainWindowHandle)
