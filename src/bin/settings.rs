@@ -837,7 +837,10 @@ fn run() -> Result<(), String> {
     let close_timer = timer.clone();
     let close_paths = paths.clone();
     ui.window().on_close_requested(move || {
-        trace_settings(&close_paths, "window close: on_close_requested callback entered");
+        trace_settings(
+            &close_paths,
+            "window close: on_close_requested callback entered",
+        );
         close_requested.store(true, Ordering::Release);
         close_timer.stop();
         // Keep the native surface alive until ComponentHandle::run() regains
@@ -1169,7 +1172,10 @@ fn run() -> Result<(), String> {
     let run_result = ui.run().map_err(|error| error.to_string());
     trace_settings(&paths, "UI event loop: returned");
     ui_closing.store(true, Ordering::Release);
-    trace_settings(&paths, "worker shutdown: sending shutdown and joining I/O thread");
+    trace_settings(
+        &paths,
+        "worker shutdown: sending shutdown and joining I/O thread",
+    );
     let (overlay_dirty, uninstalled) = worker.stop()?;
     trace_settings(&paths, "worker shutdown: I/O thread joined");
     run_result?;

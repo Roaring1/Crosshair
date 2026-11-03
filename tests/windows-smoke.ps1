@@ -41,6 +41,23 @@ function Write-SmokeLog {
     Write-Host $line
 }
 
+function Wait-ForProcessExit {
+    param(
+        [Parameter(Mandatory = $true)][Diagnostics.Process] $Process,
+        [Parameter(Mandatory = $true)][int] $TimeoutMilliseconds
+    )
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    while ($watch.ElapsedMilliseconds -lt $TimeoutMilliseconds) {
+        try {
+            if ($Process.HasExited) { return $true }
+        } catch {
+            return $true
+        }
+        Start-Sleep -Milliseconds 50
+    }
+    try { return [bool]$Process.HasExited } catch { return $true }
+}
+
 Write-SmokeLog "Starting Windows installer/overlay/Settings/uninstall smoke test."
 
 function Invoke-Crosshair {
@@ -67,7 +84,7 @@ function Invoke-Crosshair {
     }
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
-    if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+    if (-not (Wait-ForProcessExit -Process $process -TimeoutMilliseconds $TimeoutMilliseconds)) {
         # Avoid Process.Kill(true) and WaitForExit after a timeout: on Windows
         # they can block while child processes still own inherited handles.
         # Stop only this CLI PID; the test's finally block separately stops
@@ -109,10 +126,9 @@ function Invoke-Crosshair {
         $process.Dispose()
         throw ($label + " timed out after " + $TimeoutMilliseconds + " ms.")
     }
-    # WaitForExit(timeout) has already confirmed that the CLI process exited.
-    # Do not call the parameterless overload: it also waits for redirected
-    # stream readers, which can remain open while the detached daemon inherits
-    # an OS pipe handle.
+    # HasExited polling has confirmed that the CLI process exited.
+    # Do not call WaitForExit(): it can also wait for redirected stream readers,
+    # which may remain open while a detached daemon inherits an OS pipe handle.
     $exitCode = $process.ExitCode
     Write-SmokeLog ("CLI PROCESS EXITED: " + $label + " (exit " + $exitCode + ")")
     $stdout = ""
@@ -166,7 +182,7 @@ function Stop-Crosshair {
     if (Test-Path -LiteralPath $Bin -PathType Leaf) {
         try {
             $quit = Start-Process -FilePath $Bin -ArgumentList "--quit" -WindowStyle Hidden -PassThru
-            if (-not $quit.WaitForExit(5000)) {
+            if (-not (Wait-ForProcessExit -Process $quit -TimeoutMilliseconds 5000)) {
                 Write-SmokeLog "Cleanup: --quit did not return within five seconds; stopping its CLI process."
                 Stop-Process -Id $quit.Id -Force -ErrorAction SilentlyContinue
             }
@@ -286,7 +302,7 @@ try {
     Write-SmokeLog "[6/9] close Settings and verify overlay lifetime is independent"
     $closeSent = $settingsProcess.CloseMainWindow()
     Write-SmokeLog ("Settings WM_CLOSE posted: " + $closeSent + "; pid=" + $settingsProcess.Id + "; hwnd=" + $settingsProcess.MainWindowHandle)
-    if (-not $settingsProcess.WaitForExit(8000)) {
+    if (-not (Wait-ForProcessExit -Process $settingsProcess -TimeoutMilliseconds 8000)) {
         $settingsProcess.Refresh()
         Write-SmokeLog ("Settings close timeout: pid=" + $settingsProcess.Id + "; hasExited=" + $settingsProcess.HasExited + "; hwnd=" + $settingsProcess.MainWindowHandle)
         $daemonLog = Join-Path $env:LOCALAPPDATA "Crosshair\crosshair.log"
@@ -322,7 +338,7 @@ try {
     Write-SmokeLog "[9/9] uninstall through the installed CLI from its own working directory"
     Write-SmokeLog "Launching --uninstall; the deferred helper must remove the install folder after the CLI exits."
     $uninstallProcess = Start-Process -FilePath $Bin -ArgumentList "--uninstall" -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru
-    if (-not $uninstallProcess.WaitForExit(10000)) {
+    if (-not (Wait-ForProcessExit -Process $uninstallProcess -TimeoutMilliseconds 10000)) {
         throw "The installed CLI did not return from --uninstall within ten seconds."
     }
     if ($uninstallProcess.ExitCode -ne 0) {
