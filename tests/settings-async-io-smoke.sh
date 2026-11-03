@@ -124,7 +124,7 @@ xvfb-run -a bash -c '
     echo "[4] queue Install autostart while the first preview request is still in flight"
     xdotool mousemove --window "$window" 75 24 click 1
     sleep 0.15
-    xdotool mousemove --window "$window" 515 187 click 1
+    xdotool mousemove --window "$window" 589 207 click 1
     sleep 0.15
     xdotool mousemove --window "$window" 140 398 click 1
     test ! -f "$REPLIED"
