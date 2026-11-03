@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+#[cfg(windows)]
+#[path = "platform/windows.rs"]
+pub mod windows;
+
 pub mod render;
 
 pub const APP_ID: &str = "crosshair";
