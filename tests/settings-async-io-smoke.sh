@@ -126,7 +126,7 @@ xvfb-run -a bash -c '
     sleep 0.15
     xdotool mousemove --window "$window" 589 207 click 1
     sleep 0.15
-    xdotool mousemove --window "$window" 140 398 click 1
+    xdotool mousemove --window "$window" 140 450 click 1
     test ! -f "$REPLIED"
     AUTOSTART="$XDG_CONFIG_HOME/autostart/crosshair.desktop"
 
