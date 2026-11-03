@@ -41,3 +41,22 @@ currently exposes a single integer-scale virtual output. It does not validate
 fractional scaling, physical multi-monitor layout, hotplug, GPU scanout,
 fullscreen game behavior, or target-machine pointer passthrough. Those remain
 separate manual release checks.
+
+
+## Settings UI screenshots
+
+The Linux CI job captures the Rust Settings window under a private Xvfb display.
+It records General, Appearance, the interactive color palette, and the scrolled
+lower Appearance controls. The screenshots are uploaded as the
+`crosshair-rust-settings-ui` workflow artifact; they are diagnostic evidence,
+not a substitute for visual review on the target KDE Wayland session.
+
+To capture them locally after a debug build:
+
+```bash
+xvfb-run -a -s "-screen 0 1280x900x24" bash tests/settings-screenshots.sh
+```
+
+The script uses temporary HOME/XDG directories and shuts down its own overlay
+and Settings processes on exit. It does not attach to or change the active
+desktop session.
