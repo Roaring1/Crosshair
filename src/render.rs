@@ -80,6 +80,48 @@ pub fn render_crosshair_scaled(config: &Config, scale: u32) -> Result<Raster, Co
     render_normalized(&scaled)
 }
 
+/// Render a normalized configuration at an effective Windows monitor DPI.
+///
+/// `dpi` is expressed relative to the 96-DPI logical desktop baseline. Values
+/// are bounded to 50%-400% to avoid pathological allocations from bad driver
+/// reports while preserving fractional scales such as 125%, 150% and 175%.
+pub fn render_crosshair_dpi(config: &Config, dpi: u32) -> Result<Raster, CoreError> {
+    let mut scaled = config.clone();
+    scaled.normalize();
+    let dpi = dpi.clamp(48, 384);
+    scale_normalized_config_ratio(&mut scaled, dpi, 96);
+    render_normalized(&scaled)
+}
+
+fn scale_normalized_config_ratio(config: &mut Config, numerator: u32, denominator: u32) {
+    let mul_u16 = |value: u16| -> u16 {
+        ((u32::from(value) * numerator + denominator / 2) / denominator).min(u32::from(u16::MAX))
+            as u16
+    };
+    let mul_i16 = |value: i16| -> i16 {
+        let value = i32::from(value) * numerator as i32;
+        let denominator = denominator as i32;
+        let rounded = if value >= 0 {
+            (value + denominator / 2) / denominator
+        } else {
+            (value - denominator / 2) / denominator
+        };
+        rounded.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+    };
+
+    config.size = mul_u16(config.size);
+    config.thickness = mul_u16(config.thickness);
+    config.gap = mul_u16(config.gap);
+    config.offset_x = mul_i16(config.offset_x);
+    config.offset_y = mul_i16(config.offset_y);
+    config.outline.thickness = mul_u16(config.outline.thickness);
+    config.shadow.offset_x = mul_i16(config.shadow.offset_x);
+    config.shadow.offset_y = mul_i16(config.shadow.offset_y);
+    config.reference_dot.size = mul_u16(config.reference_dot.size);
+    config.reference_dot.offset_x = mul_i16(config.reference_dot.offset_x);
+    config.reference_dot.offset_y = mul_i16(config.reference_dot.offset_y);
+}
+
 fn scale_normalized_config(config: &mut Config, scale: u32) {
     let factor = scale.clamp(1, 4) as u16;
     let signed_factor = factor as i16;
@@ -766,5 +808,42 @@ mod tests {
             assert!(pixel[1] <= pixel[3]);
             assert!(pixel[2] <= pixel[3]);
         }
+    }
+
+    #[test]
+    fn fractional_dpi_scales_geometry_and_offsets_without_whole_scale_rounding() {
+        let config = Config {
+            shape: "cross".into(),
+            size: 10,
+            thickness: 3,
+            gap: 5,
+            offset_x: 7,
+            offset_y: -5,
+            ..Default::default()
+        };
+        let one_x = render_crosshair_dpi(&config, 96).unwrap();
+        let one_and_half = render_crosshair_dpi(&config, 144).unwrap();
+        let two_x = render_crosshair_dpi(&config, 192).unwrap();
+
+        assert!(one_and_half.width > one_x.width);
+        assert!(one_and_half.width < two_x.width);
+        let mut normalized = config.clone();
+        normalized.normalize();
+        scale_normalized_config_ratio(&mut normalized, 144, 96);
+        assert_eq!(
+            (normalized.size, normalized.thickness, normalized.gap),
+            (15, 5, 8)
+        );
+        assert_eq!((normalized.offset_x, normalized.offset_y), (11, -8));
+        assert_eq!(
+            render_crosshair_dpi(&config, 1).unwrap(),
+            render_crosshair_dpi(&config, 48).unwrap(),
+            "DPI fallback is bounded at 50%"
+        );
+        assert_eq!(
+            render_crosshair_dpi(&config, 1000).unwrap(),
+            render_crosshair_dpi(&config, 384).unwrap(),
+            "DPI reports are bounded at 400%"
+        );
     }
 }
