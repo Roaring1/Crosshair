@@ -100,8 +100,10 @@ try {
     }
     $null = Invoke-Crosshair -Arguments @("--autostart")
     $runValue = (Get-ItemProperty -LiteralPath $RunKey -Name "Crosshair").Crosshair
-    if ($runValue -notmatch [regex]::Escape($Bin) -or $runValue -notmatch "--daemon") {
-        throw "Opt-in login startup did not point to the installed Rust daemon."
+    if ($runValue -notmatch [regex]::Escape($Bin) -or
+        $runValue -notmatch "--daemon" -or
+        $runValue -notmatch "-WindowStyle Hidden") {
+        throw "Opt-in login startup did not launch the installed Rust daemon without a console window."
     }
     $null = Invoke-Crosshair -Arguments @("--remove-autostart")
     $runProperties = Get-ItemProperty -LiteralPath $RunKey -ErrorAction SilentlyContinue
