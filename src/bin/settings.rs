@@ -861,10 +861,9 @@ fn run() -> Result<(), String> {
                 trace_settings(&quit_paths, "window close: deferred quit timer fired");
                 match quit_ui.upgrade() {
                     Some(ui) => match ui.hide() {
-                        Ok(()) => trace_settings(
-                            &quit_paths,
-                            "window close: Settings component hidden",
-                        ),
+                        Ok(()) => {
+                            trace_settings(&quit_paths, "window close: Settings component hidden")
+                        },
                         Err(error) => trace_settings(
                             &quit_paths,
                             &format!("window close: Settings hide failed: {error}"),
@@ -887,10 +886,7 @@ fn run() -> Result<(), String> {
                 }
             },
         );
-        trace_settings(
-            &close_paths,
-            "window close: deferred hide/quit timer armed",
-        );
+        trace_settings(&close_paths, "window close: deferred hide/quit timer armed");
         slint::CloseRequestResponse::KeepWindowShown
     });
 
