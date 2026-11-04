@@ -808,7 +808,23 @@ fn process_request(
             *config.lock().map_err(|_| "Configuration lock poisoned")? = next;
             if should_stop {
                 running.store(false, Ordering::Release);
-                unsafe { PostThreadMessageW(main_thread, WM_QUIT, 0, 0) };
+                let posted = unsafe { PostThreadMessageW(main_thread, WM_QUIT, 0, 0) };
+                if posted == 0 {
+                    let error = unsafe { GetLastError() };
+                    trace(
+                        paths,
+                        &format!(
+                            "IPC {command}: stopped flag set, but WM_QUIT post to thread {main_thread} failed (Windows error {error})"
+                        ),
+                    );
+                } else {
+                    trace(
+                        paths,
+                        &format!(
+                            "IPC {command}: stopped flag set; WM_QUIT posted to thread {main_thread}"
+                        ),
+                    );
+                }
             } else {
                 unsafe { PostThreadMessageW(main_thread, WM_APP_REFRESH, 0, 0) };
             }
@@ -1433,6 +1449,13 @@ pub fn run(config: Config, paths: AppPaths) -> Result<(), String> {
     loop {
         let result = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
         if result <= 0 {
+            trace(
+                &paths,
+                &format!(
+                    "daemon message loop exiting: GetMessageW returned {result} (message 0x{:04x})",
+                    message.message
+                ),
+            );
             break;
         }
         if message.message == WM_APP_REFRESH {
@@ -1462,6 +1485,10 @@ pub fn run(config: Config, paths: AppPaths) -> Result<(), String> {
     worker
         .join()
         .map_err(|_| "Windows IPC worker panicked".to_string())??;
+    trace(
+        &paths,
+        "daemon shutdown complete: overlay windows destroyed, IPC worker joined",
+    );
     Ok(())
 }
 

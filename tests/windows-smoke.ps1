@@ -232,6 +232,12 @@ function Wait-ForStatus {
         }
         Start-Sleep -Milliseconds 100
     }
+    Write-SmokeLog "Status wait timed out for '$Expected'. Last response: $last"
+    $appLog = Join-Path $env:LOCALAPPDATA "Crosshair\crosshair.log"
+    if (Test-Path -LiteralPath $appLog -PathType Leaf) {
+        Write-SmokeLog "Crosshair app trace at status timeout:"
+        Get-Content -LiteralPath $appLog -Tail 160 | ForEach-Object { Write-SmokeLog ("APP: " + $_) }
+    }
     throw "Timed out waiting for status '$Expected'. Last response: $last"
 }
 
@@ -574,6 +580,11 @@ try {
 }
 finally {
     Write-SmokeLog "Entering bounded test cleanup."
+    $appLog = Join-Path $env:LOCALAPPDATA "Crosshair\crosshair.log"
+    if (Test-Path -LiteralPath $appLog -PathType Leaf) {
+        Write-SmokeLog "Final Crosshair app trace:"
+        Get-Content -LiteralPath $appLog -Tail 160 | ForEach-Object { Write-SmokeLog ("APP: " + $_) }
+    }
     if ($null -ne $trayProcess -and -not $trayProcess.HasExited) {
         try { Stop-Process -Id $trayProcess.Id -Force -ErrorAction SilentlyContinue } catch {}
     }
