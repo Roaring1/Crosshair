@@ -449,11 +449,14 @@ try {
         throw ("Tray left-click did not complete its callback/launch path. callback=$callbackTrace launch=$launchTrace; trace: " + ($lastTrayTrace -join " | "))
     }
     $null = Wait-ForStatus "Overlay setting: disabled"
+    # Snapshot before posting: the callback and child spawn can complete in
+    # the same scheduler slice as PostMessage, so sampling afterward races a
+    # fast successful launch and can mistake it for the baseline.
+    $toggleTraceCountBefore = @(Select-String -LiteralPath $trayLog -SimpleMatch "tray: launched --toggle from " -ErrorAction SilentlyContinue).Count
     if (-not [CrosshairSmokeNative]::PostMessage($trayHwnd, $trayCallback, [IntPtr]::Zero, [IntPtr]$wmLeftButtonUp)) {
         throw "Could not post the second tray icon left-click callback."
     }
     $secondCallbackDeadline = [DateTime]::UtcNow.AddSeconds(5)
-    $toggleTraceCountBefore = @(Select-String -LiteralPath $trayLog -SimpleMatch "tray: launched --toggle from " -ErrorAction SilentlyContinue).Count
     while ([DateTime]::UtcNow -lt $secondCallbackDeadline) {
         $toggleTraceCount = @(Select-String -LiteralPath $trayLog -SimpleMatch "tray: launched --toggle from " -ErrorAction SilentlyContinue).Count
         if ($toggleTraceCount -gt $toggleTraceCountBefore) { break }
