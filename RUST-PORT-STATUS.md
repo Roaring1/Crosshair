@@ -2,7 +2,7 @@
 
 ## Latest checkpoint — 2026-11-04
 
-### App Activity launch preferences — local implementation complete; hosted CI pending
+### App Activity launch preferences — implementation and hosted CI complete (2026-11-04)
 
 - Added one persisted **App Activity** preference. It controls only what a plain application launch does; it does not disable or hide features. The values are **App UI**, **System tray** (Windows only), and **Command only**.
 - Activity and auto-save are now treated as Settings metadata, not overlay settings. Changing only these values saves the config without sending an overlay preview or waking the overlay daemon. A forced initial sync still starts the overlay when the saved overlay is enabled; changes to visual/monitor/enabled fields continue through the existing overlay worker.
@@ -11,8 +11,16 @@
 - The Windows Start Menu has a mode-aware **Crosshair** entry and a separate unconditional **Crosshair Settings** entry. The mode-aware entry uses the existing GUI-subsystem Settings executable as a no-console launcher, so choosing Command only stays quiet and choosing System tray does not flash a console window. The tray can also open or foreground Settings.
 - The Windows installer/uninstaller now manage both shortcuts and the tray icon, and stop only matching installed tray/CLI processes when replacing or removing the app. Login autostart remains a separate, explicit choice and is not changed by App Activity.
 - Linux exposes App UI and Command only; the tray option is not shown there. `crosshair --toggle` remains the quick-toggle route. This avoids promising a native Wayland tray where desktop support is not consistent.
-- Local Linux verification after the metadata separation passed: 59 Rust tests (33 core, 18 Linux backend, 8 Settings), `cargo check --locked --features settings-ui --all-targets`, debug and optimized builds, debug/release install-autostart-uninstall smoke, and the eight-screen Xvfb Settings visual/close test, including command-only explicit UI access and changing the saved App Activity selection. No compiler warnings were reported. Hosted Windows compilation and the expanded tray/launcher smoke test remain the authoritative checks for the Win32 implementation. The user's real multi-monitor, DPI, pointer-pass-through and game tests remain reserved for the final release-acceptance pass.
+- Local Linux verification after the metadata separation passed: 59 Rust tests (33 core, 18 Linux backend, 8 Settings), `cargo check --locked --features settings-ui --all-targets`, debug and optimized builds, debug/release install-autostart-uninstall smoke, and the eight-screen Xvfb Settings visual/close test, including command-only explicit UI access and changing the saved App Activity selection. No compiler warnings were reported.
+- Hosted run [#191](https://github.com/Roaring1/Crosshair/actions/runs/41776559716) passed all eight jobs on commit `a400628b3b62624d2e54a94f8445246e92cc13d0`: Linux Rust checks/build/render parity/install/Settings responsiveness and screenshots; Windows-native Rust tests, optimized executables, full installer/overlay/named-pipe/Settings/tray/launcher/shutdown smoke and Windows x64 package upload; Python 3.10–3.14; dependency vulnerability audit.
+- The Windows smoke now proves command-only stays quiet while explicit CLI/Settings actions remain available; the App UI and System tray Start Menu paths work; tray startup cold-starts a saved enabled overlay; two simulated tray clicks toggle the overlay in both directions; and exiting the tray leaves the overlay independent. Installer/uninstaller and package upload passed.
+- Run [#190](https://github.com/Roaring1/Crosshair/actions/runs/41753194324) exposed a test-harness race, not a tray dispatch failure: the trace showed both notification callbacks and both detached `--toggle` child launches. The smoke captured its pre-click launch count after posting the second callback, allowing a fast successful launch to be counted as the baseline. Commit `a400628` moved the snapshot before `PostMessage`; run #191 then passed the complete Windows smoke.
+- The user's real multi-monitor, mixed/fractional DPI, pointer-pass-through, fullscreen-game and live KDE Wayland tests remain reserved for the final release-acceptance pass. Do not claim release readiness or merge PR #3 before those checks.
 
+
+### Previous hosted diagnostic checkpoint — runs #189 and #190
+
+The following failures are historical and superseded by the successful run #191 above. They are retained to make the debugging sequence explicit.
 
 ### Hosted validation update — run #189
 
@@ -20,8 +28,9 @@
 - Linux completed fully green: Rust tests and executable builds, Cairo renderer parity, normal and optimized install/autostart/uninstall lifecycle, X11 click-through/cold-start, Settings autostart, delayed-IPC responsiveness, IPC recovery, rapid edits during socket replacement, Settings close, screenshot capture/upload, all passed.
 - Windows formatting, Windows-native Rust tests and optimized executable builds passed. The expanded Windows smoke also passed the earlier `--hide`/daemon-shutdown checks and the mode-aware Start Menu launcher checks, then failed during the simulated tray left-click: the overlay remained enabled and no `--toggle` IPC request was observed.
 - Run #189's diagnostic artifact was inspected. It contains status traffic after the simulated left-click but no tray callback trace; the previous smoke did not instrument the tray window procedure or child-process launch, so it could not distinguish callback-delivery from child-spawn failure.
-- The next diagnostic change adds tray-specific traces for controller startup, notification callback receipt/event code, context-menu selection, detached CLI child spawn success/failure, icon registration and tray shutdown. The Windows smoke now separately waits for proof that the left-click callback arrived and that it launched `crosshair --toggle`, before asserting the overlay state. This is a diagnostic refinement, not a relaxation of the expected tray behavior.
-- PR #3 remains draft. The real Windows tray click/menu interaction on the laptop remains part of the user's final hardware acceptance pass; do not claim release readiness before it and the remaining multi-monitor/DPI/game and KDE fullscreen gates pass.
+- Commit `0b48ea7` added tray-specific traces for controller startup, notification callback receipt/event code, context-menu selection, detached CLI child spawn success/failure, icon registration and tray shutdown.
+- Run [#190](https://github.com/Roaring1/Crosshair/actions/runs/41753194324) confirmed that the simulated click callbacks were received and both `--toggle` children were spawned. The assertion failed because the test recorded the baseline spawn count after posting the second click. This was corrected in `a400628` by recording the count before the callback is posted; the complete follow-up run #191 passed.
+- PR #3 remains draft. Real Windows tray/menu interaction, multi-display/DPI, game passthrough/fullscreen, and KDE fullscreen acceptance remain reserved for the final hardware pass.
 
 
 The tested executable-code checkpoint is `12083973ee15da0a1216f11b1b2d5231f73ee3c1`, containing the Windows Settings shutdown fix (`e8dabff`), desktop accent integration (`9ce53cf`), and rustfmt correction (`59e4ee8`). PR head `229e45099afbc56f205547513291f4b578667668` then updated this report only. Full CI run #184 on that head completed green. PR #3 remains draft.
