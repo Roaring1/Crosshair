@@ -56,13 +56,19 @@ for _ in $(seq 1 100); do
     sleep 0.05
 done
 test -n "$WINDOW"
+window_height() {
+    xdotool getwindowgeometry --shell "$WINDOW" | awk -F= '$1 == "HEIGHT" { print $2 }'
+}
+INITIAL_WINDOW_HEIGHT="$(window_height)"
+test "$INITIAL_WINDOW_HEIGHT" = 520
 
 echo "[2] expand General startup controls and click Install"
 # App Activity adds 68 px to the General page, so the startup disclosure
 # and its expanded install action moved down by the same amount.
-xdotool mousemove --window "$WINDOW" 589 315 click 1
+xdotool mousemove --window "$WINDOW" 589 283 click 1
 sleep 0.45
-xdotool mousemove --window "$WINDOW" 140 518 click 1
+test "$(window_height)" = "$INITIAL_WINDOW_HEIGHT"
+xdotool mousemove --window "$WINDOW" 140 430 click 1
 for _ in $(seq 1 80); do
     [[ -f "$AUTOSTART" ]] && break
     sleep 0.05
@@ -71,12 +77,14 @@ test -f "$AUTOSTART"
 test -f "$APP_ENTRY"
 grep -q -- "--daemon --no-ui" "$AUTOSTART"
 echo "PASS: Settings Install autostart created the XDG entry"
+test "$(window_height)" = "$INITIAL_WINDOW_HEIGHT"
 
 echo "[3] click Remove autostart"
-# The one-line result feedback expands the window slightly, leaving the
-# optional startup buttons fully in view.
+# Feedback is rendered inline without resizing the native window. The
+# top-aligned General content keeps both startup actions in the same place.
 sleep 0.35
-xdotool mousemove --window "$WINDOW" 468 590 click 1
+test "$(window_height)" = "$INITIAL_WINDOW_HEIGHT"
+xdotool mousemove --window "$WINDOW" 468 450 click 1
 for _ in $(seq 1 80); do
     [[ ! -e "$AUTOSTART" ]] && break
     sleep 0.05

@@ -2,15 +2,15 @@
 
 Native Rust crosshair overlay for Linux and Windows.
 
-> **Development-branch notice:** This is the native rewrite on `rust-port`, versioned `4.0.0` in Cargo. It is still under release validation and is not a published stable release. The established Python application remains on `main`. Keep the baseline and user configuration recoverable until the real-session and Windows-laptop checks are complete. See [RUST-PORT-STATUS.md](RUST-PORT-STATUS.md) for the side-by-side comparison and open release gates.
+> **Development-branch notice:** This is the native Rust rewrite on `rust-port` (Cargo version `4.0.0`), not a published stable release. The established Python application and its release history remain on `main`; this branch is a separate implementation. Windows multi-monitor rendering and Settings on Windows/Linux have been user-tested. Some platform-specific fullscreen, pointer-passthrough, DPI and monitor-hotplug checks remain unclaimed. See [RUST-PORT-STATUS.md](RUST-PORT-STATUS.md) for the current validation record.
 
 ## Platform support
 
 | Platform | Backend | Current status |
 | --- | --- | --- |
-| Linux / Wayland | Native Wayland layer-shell client | Implemented; real KDE/Plasma validation remains open |
+| Linux / Wayland | Native Wayland layer-shell client | Implemented; Settings is user-confirmed on Linux; live pointer-passthrough and fullscreen acceptance remain open |
 | Linux / X11 | Native X11 overlay | Implemented; automated Xvfb click-through and lifecycle checks pass |
-| Windows 10 1607+ / x64 | Win32 layered window and per-user named-pipe IPC | Implemented; Windows CI and real laptop validation are release gates |
+| Windows 10 1607+ / x64 | Win32 layered window and per-user named-pipe IPC | User-confirmed multi-monitor rendering and Settings; hosted installer/tray/overlay tests pass; mixed-DPI, hot-plug and fullscreen acceptance remain separate checks |
 | macOS | — | Not implemented |
 
 The overlay is designed to remain topmost, non-activating and click-through. Settings is a separate Slint application and can close without necessarily closing an enabled overlay.
@@ -83,7 +83,7 @@ The Windows CI job builds the two native executables, exercises the per-user ins
 - `Uninstall-Crosshair.ps1`
 - `README-WINDOWS.txt`
 
-When the Windows package artifact is available on the draft PR workflow run, download and extract it to a normal user-writable directory, then run this from PowerShell:
+Download the `Crosshair-Windows-x64` artifact from a successful [PR #3 Actions run](https://github.com/Roaring1/Crosshair/actions), extract it to a normal user-writable directory, then run this from PowerShell:
 
 ```powershell
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\Install-Crosshair.ps1
@@ -93,7 +93,7 @@ No administrator rights are required. The installer targets `%LOCALAPPDATA%\Prog
 
 The in-app uninstall action defers file removal until the CLI and Settings processes have exited. Configuration under `%APPDATA%\Crosshair` is retained.
 
-**Do not treat the Windows port as fully verified until the CI smoke test passes and the package has been exercised on the target Windows laptop.** The smoke test cannot replace checks for the actual GPU/display driver, multiple monitors and mixed DPI, game fullscreen behavior, pointer passthrough, sleep/resume and Settings behavior on the real desktop.
+The hosted Windows smoke covers the installer, overlay, named-pipe IPC, Settings, tray and shutdown lifecycle. User testing has also confirmed that the overlay renders correctly across multiple monitors and that Settings works on Windows. Mixed/fractional DPI, monitor hot-plug, fullscreen-game behavior, pointer passthrough and sleep/resume are distinct checks and are not implied by those results.
 
 ## CLI
 
@@ -153,6 +153,10 @@ bash tests/settings-ipc-restart-smoke.sh
 xvfb-run -a bash tests/settings-close-smoke.sh
 ```
 
-The Linux job additionally captures seven Settings UI screenshots under an isolated Xvfb display. The Windows job runs native Rust tests, optimized builds and a PowerShell install/overlay/IPC/Settings/uninstall smoke test before packaging the x64 installer.
+The Linux job additionally captures eight Settings UI screenshots under an isolated Xvfb display, including General/Appearance navigation, color selection, expanded controls and scrolling. The Windows job runs native Rust tests, optimized builds and a PowerShell install/overlay/IPC/Settings/uninstall smoke test before packaging the x64 installer.
 
-See [RUST-PORT-TESTING.md](RUST-PORT-TESTING.md) for the isolated Wayland compositor test, screenshot coverage and limitations. See [RUST-PORT-STATUS.md](RUST-PORT-STATUS.md) for current CI evidence and remaining release gates.
+See [RUST-PORT-TESTING.md](RUST-PORT-TESTING.md) for the isolated Wayland compositor test, screenshot coverage and limitations. See [RUST-PORT-STATUS.md](RUST-PORT-STATUS.md) for current CI evidence and remaining platform checks.
+
+## License status
+
+This repository currently has no `LICENSE` file. No open-source license is implied; do not assume permission to redistribute or publish modified builds until the project owner selects and adds a license.

@@ -2,6 +2,16 @@
 
 ## Latest checkpoint — 2026-11-04
 
+### Final Settings polish and user acceptance
+
+- User acceptance: the Windows overlay renders correctly across multiple monitors; Settings works on both Windows and Linux.
+- General and Appearance use one exclusive `active-tab` state for their selected accent. Selecting either tab now clears the previous highlight.
+- The Settings window uses one stable 520px height. Both scroll-page layouts align their controls to the top, rather than stretching rows to fill spare height. Expanding General startup options, changing tabs, opening the color palette, and showing feedback no longer trigger top-level resizing; long content remains scrollable.
+- The screenshot and autostart UI smokes now check the fixed height and use click positions matching the top-aligned layouts. The autostart smoke verifies install/remove controls and that closing Settings leaves the overlay running.
+- Local Linux validation on the final UI candidate: 59 Rust tests passed (33 core/config/render/IPC, 18 Linux backend, 8 Settings); Settings build passed; all eight screenshot/scroll captures passed; autostart install/remove and Settings-close/overlay-independence smokes passed; shell syntax and `git diff --check` passed.
+- Hosted run [#193](https://github.com/Roaring1/Crosshair/actions/runs/41781354749) passed Windows, Python 3.10–3.14 and dependency audit, but its Linux Settings autostart smoke exposed stale hard-coded click coordinates after the fixed-height page layout changed. The UI actions were subsequently reproduced and passed locally after correcting the coordinates and anchoring the content to the top. A fresh hosted run on this corrected candidate is required before calling the PR fully green.
+- Remaining separate platform checks: Windows mixed/fractional DPI and display hot-plug, fullscreen-game/pointer-passthrough behavior, and live KDE Wayland pointer-passthrough/fullscreen behavior. The Windows multi-monitor rendering and Settings acceptance above are confirmed; these other checks are not implied by it.
+
 ### App Activity launch preferences — implementation and hosted CI complete (2026-11-04)
 
 - Added one persisted **App Activity** preference. It controls only what a plain application launch does; it does not disable or hide features. The values are **App UI**, **System tray** (Windows only), and **Command only**.
@@ -15,7 +25,7 @@
 - Hosted run [#191](https://github.com/Roaring1/Crosshair/actions/runs/41776559716) passed all eight jobs on commit `a400628b3b62624d2e54a94f8445246e92cc13d0`: Linux Rust checks/build/render parity/install/Settings responsiveness and screenshots; Windows-native Rust tests, optimized executables, full installer/overlay/named-pipe/Settings/tray/launcher/shutdown smoke and Windows x64 package upload; Python 3.10–3.14; dependency vulnerability audit.
 - The Windows smoke now proves command-only stays quiet while explicit CLI/Settings actions remain available; the App UI and System tray Start Menu paths work; tray startup cold-starts a saved enabled overlay; two simulated tray clicks toggle the overlay in both directions; and exiting the tray leaves the overlay independent. Installer/uninstaller and package upload passed.
 - Run [#190](https://github.com/Roaring1/Crosshair/actions/runs/41753194324) exposed a test-harness race, not a tray dispatch failure: the trace showed both notification callbacks and both detached `--toggle` child launches. The smoke captured its pre-click launch count after posting the second callback, allowing a fast successful launch to be counted as the baseline. Commit `a400628` moved the snapshot before `PostMessage`; run #191 then passed the complete Windows smoke.
-- The user's real multi-monitor, mixed/fractional DPI, pointer-pass-through, fullscreen-game and live KDE Wayland tests remain reserved for the final release-acceptance pass. Do not claim release readiness or merge PR #3 before those checks.
+- The user has confirmed Windows multi-monitor rendering and Settings on Windows/Linux. Mixed/fractional DPI, monitor hot-plug, fullscreen-game/pointer-pass-through behavior, and live KDE Wayland pointer-passthrough/fullscreen acceptance remain distinct checks. Keep release claims limited to what has been directly tested.
 
 
 ### Previous hosted diagnostic checkpoint — runs #189 and #190
@@ -30,7 +40,7 @@ The following failures are historical and superseded by the successful run #191 
 - Run #189's diagnostic artifact was inspected. It contains status traffic after the simulated left-click but no tray callback trace; the previous smoke did not instrument the tray window procedure or child-process launch, so it could not distinguish callback-delivery from child-spawn failure.
 - Commit `0b48ea7` added tray-specific traces for controller startup, notification callback receipt/event code, context-menu selection, detached CLI child spawn success/failure, icon registration and tray shutdown.
 - Run [#190](https://github.com/Roaring1/Crosshair/actions/runs/41753194324) confirmed that the simulated click callbacks were received and both `--toggle` children were spawned. The assertion failed because the test recorded the baseline spawn count after posting the second click. This was corrected in `a400628` by recording the count before the callback is posted; the complete follow-up run #191 passed.
-- PR #3 remains draft. Real Windows tray/menu interaction, multi-display/DPI, game passthrough/fullscreen, and KDE fullscreen acceptance remain reserved for the final hardware pass.
+- At this earlier hosted diagnostic checkpoint, PR #3 was still draft and those physical acceptance checks had not yet been reported. See the latest checkpoint at the top of this document for subsequent user acceptance.
 
 
 The tested executable-code checkpoint is `12083973ee15da0a1216f11b1b2d5231f73ee3c1`, containing the Windows Settings shutdown fix (`e8dabff`), desktop accent integration (`9ce53cf`), and rustfmt correction (`59e4ee8`). PR head `229e45099afbc56f205547513291f4b578667668` then updated this report only. Full CI run #184 on that head completed green. PR #3 remains draft.
@@ -42,7 +52,7 @@ The tested executable-code checkpoint is `12083973ee15da0a1216f11b1b2d5231f73ee3
 - The final Windows artifact is `Crosshair-Windows-x64.zip` from run #184. SHA-256: `29d0336eef9bedafc6859f6a68570345e9b78e3e44823fe0eaed45c64ba94c93`. It was transferred to the laptop and the received ZIP hash matched exactly.
 - Local checks on the same source: `cargo check --locked --features settings-ui --all-targets` passed; all 56 Rust tests passed (32 core/renderer/IPC, 18 Linux backend, 6 Settings); optimized Linux CLI and Settings binaries built successfully. Four Settings tests cover KDE accent precedence/fallback/section parsing/malformed input.
 
-### Windows 11 laptop — physical desktop
+### Earlier Windows 11 laptop test — one display present at that checkpoint
 
 - Installed the run #184 package into `%LOCALAPPDATA%\Programs\Crosshair` with the per-user installer. Installed CLI SHA-256: `AFE769523C41199DEF5168D442C3F72B7CF7A10754DAA7C0DBA465E8D5E0F73A`. Installed Settings SHA-256: `5BC2756FDE850D4D0D274EE403E933A5CD17171EAE1307F103E1ACD73763850E`.
 - The existing configuration was preserved byte-for-byte: SHA-256 `1F61272337DE3F4FEFF56B7B3FA41CE4A2A2155BD925EBC1ABA6FFCF6C0AB90B`; `enabled=false`, `auto_save=true`. Login autostart remains absent. The installer updated PATH and the Start Menu shortcut; it did not remove Python files.
@@ -64,11 +74,11 @@ The tested executable-code checkpoint is `12083973ee15da0a1216f11b1b2d5231f73ee3
 - KDE reads the selected Plasma `[General] AccentColor=233,58,154` (`#e93a9a`), matching the source used by Hearth. The XDG portal on this system reports the different selection color `#ad3376`; the Settings UI therefore applies Plasma's `kdeglobals` value to Slint's shared widget palette after the portal update and refreshes it while the window is open. It falls back to `LastUsedCustomAccentColor` if necessary. The overlay's configured crosshair color is independent.
 - Slint 1.18.1 has no public accent override API, so the KDE path calls the pinned `i-slint-core` 1.18.1 context setter. `slint` and `i-slint-core` are pinned to the same exact version to avoid accidentally updating one side independently. Revisit this integration when upgrading Slint.
 
-### Remaining release gates
+### Remaining platform checks
 
-- Validate Windows mixed/fractional DPI, multiple active displays, display hotplug and fullscreen-game behavior; the laptop had only one active logical display in this test.
-- Validate pointer interaction/pass-through and fullscreen behavior during a deliberate live KDE desktop test. The brief real Wayland show/hide proves the saved output launches and hides, but it is not a pointer-passthrough or game-fullscreen acceptance test.
-- Validate real Windows tray click/menu behavior and launcher handoff on the laptop; hosted CI covers the native controller, shortcut behavior and independent tray/overlay lifecycle. Keep the PR in draft until the remaining real-platform gates are completed.
+- Later user acceptance has confirmed Windows multi-monitor rendering and Settings on Windows/Linux; the single-monitor observation in the earlier laptop test above is historical.
+- Still not separately verified: Windows mixed/fractional DPI, monitor hot-plug, fullscreen-game behavior and pointer passthrough.
+- Still not separately verified: live KDE Wayland pointer-passthrough/fullscreen behavior and physical Windows tray-menu interaction beyond the hosted tray/launcher tests.
 
 _Last reviewed: 2026-11-04_
 

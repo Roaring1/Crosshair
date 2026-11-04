@@ -120,7 +120,7 @@ capture "04-color-picker"
 
 echo "[5/8] Select a preset and verify that it persists"
 # Row 3, column 4 of the palette is #ec4899.
-click_at 208 396
+click_at 208 382
 sleep 0.8
 capture "05-color-selected"
 grep -qi '#ec4899' "$XDG_CONFIG_HOME/crosshair/config.json"
