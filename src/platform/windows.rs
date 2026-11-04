@@ -1101,11 +1101,18 @@ const TRAY_OPEN_SETTINGS: usize = 1;
 const TRAY_TOGGLE_CROSSHAIR: usize = 2;
 const TRAY_EXIT: usize = 3;
 
+fn tray_trace(message: &str) {
+    if let Ok(paths) = AppPaths::discover() {
+        trace(&paths, &format!("tray: {message}"));
+    }
+}
+
 fn launch_tray_action(argument: Option<&str>) {
     let Ok(executable) = std::env::current_exe() else {
+        tray_trace("could not resolve the installed CLI path for a tray action");
         return;
     };
-    let mut command = Command::new(executable);
+    let mut command = Command::new(&executable);
     if let Some(argument) = argument {
         command.arg(argument);
     }
@@ -1114,11 +1121,24 @@ fn launch_tray_action(argument: Option<&str>) {
         use std::os::windows::process::CommandExt;
         command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     }
-    let _ = command
+    match command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn();
+        .spawn()
+    {
+        Ok(child) => tray_trace(&format!(
+            "launched {} from {} (pid {})",
+            argument.unwrap_or("default action"),
+            executable.display(),
+            child.id()
+        )),
+        Err(error) => tray_trace(&format!(
+            "failed to launch {} from {}: {error}",
+            argument.unwrap_or("default action"),
+            executable.display()
+        )),
+    }
 }
 
 fn open_settings_from_tray() {
@@ -1143,8 +1163,10 @@ fn open_settings_from_tray() {
 }
 
 fn show_tray_menu(hwnd: HWND) {
+    tray_trace("opening context menu");
     let menu = unsafe { CreatePopupMenu() };
     if menu.is_null() {
+        tray_trace("CreatePopupMenu failed");
         return;
     }
     let open = wide("Show app UI");
@@ -1168,6 +1190,7 @@ fn show_tray_menu(hwnd: HWND) {
         ) as usize;
         let _ = PostMessageW(hwnd, WM_NULL, 0, 0);
         DestroyMenu(menu);
+        tray_trace(&format!("context menu dismissed with selection {selected}"));
         match selected {
             TRAY_OPEN_SETTINGS => open_settings_from_tray(),
             TRAY_TOGGLE_CROSSHAIR => launch_tray_action(Some("--toggle")),
@@ -1187,18 +1210,26 @@ unsafe extern "system" fn tray_window_proc(
 ) -> isize {
     match message {
         WM_APP_TRAY_CALLBACK => {
-            match lparam as u32 {
+            let event = lparam as u32;
+            tray_trace(&format!(
+                "notification callback received: event=0x{event:04x}"
+            ));
+            match event {
                 WM_LBUTTONUP => launch_tray_action(Some("--toggle")),
                 WM_RBUTTONUP => show_tray_menu(hwnd),
-                _ => {}
+                _ => tray_trace(&format!(
+                    "ignored notification callback event 0x{event:04x}"
+                )),
             }
             0
         }
         WM_CLOSE => {
+            tray_trace("received WM_CLOSE; destroying tray controller window");
             unsafe { DestroyWindow(hwnd) };
             0
         }
         WM_DESTROY => {
+            tray_trace("tray controller window destroyed; removing notification icon");
             let mut data = NOTIFYICONDATAW::default();
             data.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
             data.hWnd = hwnd;
@@ -1245,6 +1276,7 @@ pub fn run_tray() -> Result<(), String> {
             ),
         }
     }
+    trace(&paths, "tray controller starting");
     let class_name = wide(TRAY_WINDOW_CLASS);
     let title = wide("Crosshair Tray Controller");
     let instance = unsafe { GetModuleHandleW(null()) };
@@ -1331,6 +1363,10 @@ pub fn run_tray() -> Result<(), String> {
         ));
     }
 
+    trace(
+        &paths,
+        "tray notification-area icon added; entering message loop",
+    );
     let mut message = MSG::default();
     loop {
         let result = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
@@ -1356,6 +1392,10 @@ pub fn run_tray() -> Result<(), String> {
         unsafe { windows_sys::Win32::UI::WindowsAndMessaging::DestroyIcon(custom_icon) };
     }
     unsafe { UnregisterClassW(class_name.as_ptr(), instance) };
+    trace(
+        &paths,
+        "tray message loop exited and controller unregistered",
+    );
     Ok(())
 }
 

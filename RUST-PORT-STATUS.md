@@ -1,6 +1,6 @@
 # Native Rust port status
 
-## Latest checkpoint — 2026-11-03
+## Latest checkpoint — 2026-11-04
 
 ### App Activity launch preferences — local implementation complete; hosted CI pending
 
@@ -12,6 +12,16 @@
 - The Windows installer/uninstaller now manage both shortcuts and the tray icon, and stop only matching installed tray/CLI processes when replacing or removing the app. Login autostart remains a separate, explicit choice and is not changed by App Activity.
 - Linux exposes App UI and Command only; the tray option is not shown there. `crosshair --toggle` remains the quick-toggle route. This avoids promising a native Wayland tray where desktop support is not consistent.
 - Local Linux verification after the metadata separation passed: 59 Rust tests (33 core, 18 Linux backend, 8 Settings), `cargo check --locked --features settings-ui --all-targets`, debug and optimized builds, debug/release install-autostart-uninstall smoke, and the eight-screen Xvfb Settings visual/close test, including command-only explicit UI access and changing the saved App Activity selection. No compiler warnings were reported. Hosted Windows compilation and the expanded tray/launcher smoke test remain the authoritative checks for the Win32 implementation. The user's real multi-monitor, DPI, pointer-pass-through and game tests remain reserved for the final release-acceptance pass.
+
+
+### Hosted validation update — run #189
+
+- Run [#189](https://github.com/Roaring1/Crosshair/actions/runs/41751367205) ran against PR head `bc1a4b33a178fa20f069af86ede099ba86c9adaf`.
+- Linux completed fully green: Rust tests and executable builds, Cairo renderer parity, normal and optimized install/autostart/uninstall lifecycle, X11 click-through/cold-start, Settings autostart, delayed-IPC responsiveness, IPC recovery, rapid edits during socket replacement, Settings close, screenshot capture/upload, all passed.
+- Windows formatting, Windows-native Rust tests and optimized executable builds passed. The expanded Windows smoke also passed the earlier `--hide`/daemon-shutdown checks and the mode-aware Start Menu launcher checks, then failed during the simulated tray left-click: the overlay remained enabled and no `--toggle` IPC request was observed.
+- Run #189's diagnostic artifact was inspected. It contains status traffic after the simulated left-click but no tray callback trace; the previous smoke did not instrument the tray window procedure or child-process launch, so it could not distinguish callback-delivery from child-spawn failure.
+- The next diagnostic change adds tray-specific traces for controller startup, notification callback receipt/event code, context-menu selection, detached CLI child spawn success/failure, icon registration and tray shutdown. The Windows smoke now separately waits for proof that the left-click callback arrived and that it launched `crosshair --toggle`, before asserting the overlay state. This is a diagnostic refinement, not a relaxation of the expected tray behavior.
+- PR #3 remains draft. The real Windows tray click/menu interaction on the laptop remains part of the user's final hardware acceptance pass; do not claim release readiness before it and the remaining multi-monitor/DPI/game and KDE fullscreen gates pass.
 
 
 The tested executable-code checkpoint is `12083973ee15da0a1216f11b1b2d5231f73ee3c1`, containing the Windows Settings shutdown fix (`e8dabff`), desktop accent integration (`9ce53cf`), and rustfmt correction (`59e4ee8`). PR head `229e45099afbc56f205547513291f4b578667668` then updated this report only. Full CI run #184 on that head completed green. PR #3 remains draft.
@@ -51,7 +61,7 @@ The tested executable-code checkpoint is `12083973ee15da0a1216f11b1b2d5231f73ee3
 - Validate pointer interaction/pass-through and fullscreen behavior during a deliberate live KDE desktop test. The brief real Wayland show/hide proves the saved output launches and hides, but it is not a pointer-passthrough or game-fullscreen acceptance test.
 - Validate real Windows tray click/menu behavior and launcher handoff on the laptop; hosted CI covers the native controller, shortcut behavior and independent tray/overlay lifecycle. Keep the PR in draft until the remaining real-platform gates are completed.
 
-_Last reviewed: 2026-11-03_
+_Last reviewed: 2026-11-04_
 
 
 

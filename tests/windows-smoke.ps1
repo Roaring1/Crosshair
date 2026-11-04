@@ -430,9 +430,37 @@ try {
     if (-not [CrosshairSmokeNative]::PostMessage($trayHwnd, $trayCallback, [IntPtr]::Zero, [IntPtr]$wmLeftButtonUp)) {
         throw "Could not post the tray icon left-click callback."
     }
+    $trayLog = Join-Path $env:LOCALAPPDATA "Crosshair\crosshair.log"
+    $callbackDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    $callbackTrace = $false
+    $launchTrace = $false
+    while ([DateTime]::UtcNow -lt $callbackDeadline -and (-not $callbackTrace -or -not $launchTrace)) {
+        if (Test-Path -LiteralPath $trayLog -PathType Leaf) {
+            $trayTraceText = Get-Content -LiteralPath $trayLog -Raw
+            $callbackTrace = $trayTraceText.Contains("tray: notification callback received: event=0x0202")
+            $launchTrace = $trayTraceText.Contains("tray: launched --toggle from ")
+        }
+        if (-not $callbackTrace -or -not $launchTrace) { Start-Sleep -Milliseconds 50 }
+    }
+    if (-not $callbackTrace -or -not $launchTrace) {
+        $lastTrayTrace = if (Test-Path -LiteralPath $trayLog -PathType Leaf) {
+            Get-Content -LiteralPath $trayLog | Where-Object { $_ -match "tray:" } | Select-Object -Last 30
+        } else { @("No Crosshair application log was created.") }
+        throw ("Tray left-click did not complete its callback/launch path. callback=$callbackTrace launch=$launchTrace; trace: " + ($lastTrayTrace -join " | "))
+    }
     $null = Wait-ForStatus "Overlay setting: disabled"
     if (-not [CrosshairSmokeNative]::PostMessage($trayHwnd, $trayCallback, [IntPtr]::Zero, [IntPtr]$wmLeftButtonUp)) {
         throw "Could not post the second tray icon left-click callback."
+    }
+    $secondCallbackDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    $toggleTraceCountBefore = @(Select-String -LiteralPath $trayLog -SimpleMatch "tray: launched --toggle from " -ErrorAction SilentlyContinue).Count
+    while ([DateTime]::UtcNow -lt $secondCallbackDeadline) {
+        $toggleTraceCount = @(Select-String -LiteralPath $trayLog -SimpleMatch "tray: launched --toggle from " -ErrorAction SilentlyContinue).Count
+        if ($toggleTraceCount -gt $toggleTraceCountBefore) { break }
+        Start-Sleep -Milliseconds 50
+    }
+    if ($toggleTraceCount -le $toggleTraceCountBefore) {
+        throw "The second tray click did not launch its toggle action."
     }
     $status = Wait-ForStatus "Overlay: enabled"
 
