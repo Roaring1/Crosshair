@@ -489,13 +489,10 @@ component ColorField inherits HorizontalLayout {
 export component SettingsWindow inherits Window {
     title: "Crosshair Settings";
     width: 640px;
-    height: (root.active-tab == 0 && !root.shortcuts-expanded && !root.profile-panel-visible ? 280px : 520px)
-        + (root.active-tab == 0 ? 68px : 0px)
-        + (root.system-feedback != "" ? 44px : 0px);
-    animate height {
-        duration: 140ms;
-        easing: ease-in-out;
-    }
+    // Keep the native window geometry stable across tab switches and
+    // expandable sections. Each page owns its scrolling area instead of
+    // resizing the top-level window in response to transient content state.
+    height: 520px;
     background: Palette.background;
 
     in-out property <int> active-tab: 0;
@@ -640,14 +637,12 @@ export component SettingsWindow inherits Window {
             spacing: 4px;
             Button {
                 text: "General";
-                checkable: true;
-                checked: root.active-tab == 0;
+                primary: root.active-tab == 0;
                 clicked => { root.active-tab = 0; }
             }
             Button {
                 text: "Appearance";
-                checkable: true;
-                checked: root.active-tab == 1;
+                primary: root.active-tab == 1;
                 clicked => { root.active-tab = 1; }
             }
             HorizontalLayout { }

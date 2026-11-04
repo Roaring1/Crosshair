@@ -32,6 +32,10 @@ done
 
 test -x "$BIN"
 test -x "$SETTINGS"
+# Tab selection must be derived from one mutually exclusive state, rather
+# than two independently toggled/checkable buttons that can both stay active.
+grep -Fq 'primary: root.active-tab == 0;' "$REPO_ROOT/ui/settings.slint"
+grep -Fq 'primary: root.active-tab == 1;' "$REPO_ROOT/ui/settings.slint"
 mkdir -p "$OUT"
 rm -f "$OUT"/*.png "$OUT"/manifest.txt
 
@@ -76,6 +80,9 @@ click_at() {
     xdotool click 1
     sleep 0.35
 }
+window_height() {
+    xdotool getwindowgeometry --shell "$WINDOW" | awk -F= '$1 == "HEIGHT" { print $2 }'
+}
 capture() {
     local name="$1"
     sleep 0.35
@@ -89,6 +96,8 @@ capture() {
 
 echo "[1/8] Capture General"
 capture "01-general"
+INITIAL_WINDOW_HEIGHT="$(window_height)"
+test -n "$INITIAL_WINDOW_HEIGHT"
 
 echo "[2/8] Inspect and change App Activity preference"
 click_at 390 120
@@ -101,6 +110,7 @@ grep -qi '"activity_mode": "ui"' "$XDG_CONFIG_HOME/crosshair/config.json"
 
 echo "[3/8] Open Appearance"
 click_at 315 24
+test "$(window_height)" = "$INITIAL_WINDOW_HEIGHT"
 capture "03-appearance-top"
 
 echo "[4/8] Open the main color palette"
