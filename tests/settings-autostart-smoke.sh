@@ -5,8 +5,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 ROOT="$(mktemp -d)"
 SETTINGS_PID=""
-BIN="$REPO_ROOT/target/debug/crosshair"
-SETTINGS="$REPO_ROOT/target/debug/crosshair-settings"
+BIN="${CROSSHAIR_BIN:-$REPO_ROOT/target/debug/crosshair}"
+SETTINGS="${CROSSHAIR_SETTINGS_BIN:-$REPO_ROOT/target/debug/crosshair-settings}"
 
 cleanup() {
     "$BIN" --quit >/dev/null 2>&1 || true
@@ -58,9 +58,11 @@ done
 test -n "$WINDOW"
 
 echo "[2] expand General startup controls and click Install"
-xdotool mousemove --window "$WINDOW" 589 207 click 1
+# App Activity adds 68 px to the General page, so the startup disclosure
+# and its expanded install action moved down by the same amount.
+xdotool mousemove --window "$WINDOW" 589 315 click 1
 sleep 0.45
-xdotool mousemove --window "$WINDOW" 140 450 click 1
+xdotool mousemove --window "$WINDOW" 140 518 click 1
 for _ in $(seq 1 80); do
     [[ -f "$AUTOSTART" ]] && break
     sleep 0.05
@@ -74,7 +76,7 @@ echo "[3] click Remove autostart"
 # The one-line result feedback expands the window slightly, leaving the
 # optional startup buttons fully in view.
 sleep 0.35
-xdotool mousemove --window "$WINDOW" 468 517 click 1
+xdotool mousemove --window "$WINDOW" 468 590 click 1
 for _ in $(seq 1 80); do
     [[ ! -e "$AUTOSTART" ]] && break
     sleep 0.05

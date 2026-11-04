@@ -424,7 +424,7 @@ try {
     if (-not [CrosshairSmokeNative]::PostMessage($trayHwnd, $trayCallback, [IntPtr]::Zero, [IntPtr]$wmLeftButtonUp)) {
         throw "Could not post the tray icon left-click callback."
     }
-    $null = Wait-ForStatus "Overlay: disabled"
+    $null = Wait-ForStatus "Overlay setting: disabled"
     if (-not [CrosshairSmokeNative]::PostMessage($trayHwnd, $trayCallback, [IntPtr]::Zero, [IntPtr]$wmLeftButtonUp)) {
         throw "Could not post the second tray icon left-click callback."
     }

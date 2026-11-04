@@ -43,8 +43,9 @@ unset WAYLAND_DISPLAY
 SOCKET="$XDG_RUNTIME_DIR/crosshair/ipc.sock"
 ACCEPTED="$ROOT/ipc-accepted"
 REPLIED="$ROOT/ipc-replied"
-export SOCKET ACCEPTED REPLIED
-printf '%s\n' '{"enabled":false}' > "$XDG_CONFIG_HOME/crosshair/config.json"
+COUNT_FILE="$ROOT/ipc-count"
+export SOCKET ACCEPTED REPLIED COUNT_FILE
+printf '%s\n' '{"enabled":true,"activity_mode":"ui"}' > "$XDG_CONFIG_HOME/crosshair/config.json"
 
 # The fake daemon withholds its reply long enough for a second UI action,
 # but responds before notify_overlay's two-second read timeout.
@@ -56,6 +57,8 @@ import time
 path = os.environ["SOCKET"]
 accepted = os.environ["ACCEPTED"]
 replied = os.environ["REPLIED"]
+count_file = os.environ["COUNT_FILE"]
+request_count = 0
 server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 server.bind(path)
 os.chmod(path, 0o600)
@@ -64,6 +67,9 @@ while True:
     connection, _ = server.accept()
     try:
         payload = connection.recv(65536)
+        request_count += 1
+        with open(count_file, "w", encoding="utf-8") as marker:
+            marker.write(str(request_count))
         with open(accepted, "w", encoding="utf-8") as marker:
             marker.write("accepted")
         time.sleep(1.5)
@@ -101,36 +107,59 @@ xvfb-run -a bash -c '
     done
     test -n "$window"
     initial_height="$(xdotool getwindowgeometry --shell "$window" | sed -n "s/^HEIGHT=//p")"
-    test "$initial_height" -lt 300
+    # App Activity adds a persistent General row; the compact first-launch
+    # window is now 348px tall rather than the legacy 280px.
+    test "$initial_height" -ge 320
+    test "$initial_height" -lt 400
 
-    echo "[2] enable the overlay; wait until the fake IPC peer accepts the request"
-    xdotool mousemove --window "$window" 31 72 click 1
+    echo "[2] wait until Settings sends its initial enabled-overlay preview"
     for _ in $(seq 1 40); do
         [[ -f "$accepted" ]] && break
         sleep 0.05
     done
     test -f "$accepted"
+    test "$(cat "$COUNT_FILE")" = "1"
 
     echo "[3] switch to Appearance while the IPC peer is withholding its response"
     xdotool mousemove --window "$window" 280 24 click 1
     sleep 0.2
     responsive_height="$(xdotool getwindowgeometry --shell "$window" | sed -n "s/^HEIGHT=//p")"
-    if [[ "$responsive_height" -lt 400 ]]; then
+    if [[ "$responsive_height" -lt 500 ]]; then
         echo "Settings event loop did not process Appearance while IPC was blocked (height=$responsive_height)." >&2
         exit 1
     fi
     echo "PASS: Appearance resized the window to $responsive_height px while IPC was waiting"
 
-    echo "[4] queue Install autostart while the first preview request is still in flight"
+    echo "[4] change App Activity while the original preview request remains in flight"
     xdotool mousemove --window "$window" 75 24 click 1
-    sleep 0.15
-    xdotool mousemove --window "$window" 589 207 click 1
-    sleep 0.15
-    xdotool mousemove --window "$window" 140 450 click 1
+    sleep 0.2
+    xdotool mousemove --window "$window" 390 120 click 1
+    sleep 0.1
+    xdotool mousemove --sync --window "$window" 160 168 click 1
+    sleep 0.1
     test ! -f "$REPLIED"
-    AUTOSTART="$XDG_CONFIG_HOME/autostart/crosshair.desktop"
 
-    echo "[5] close Settings while Install autostart is queued behind delayed IPC"
+    echo "[5] wait for the queued launch preference to persist without a second overlay preview"
+    saved_mode=false
+    for _ in $(seq 1 80); do
+        if [[ -f "$REPLIED" ]] && grep -qi "\"activity_mode\": \"command\"" "$XDG_CONFIG_HOME/crosshair/config.json"; then
+            saved_mode=true
+            break
+        fi
+        sleep 0.05
+    done
+    if [[ "$saved_mode" != true ]]; then
+        echo "App Activity change was not persisted after the delayed preview response." >&2
+        cat "$4/settings.log" >&2 || true
+        exit 1
+    fi
+    if [[ "$(cat "$COUNT_FILE")" != "1" ]]; then
+        echo "Changing App Activity unexpectedly sent an additional overlay preview request (count=$(cat "$COUNT_FILE"))." >&2
+        exit 1
+    fi
+    echo "PASS: App Activity persisted after delayed IPC without waking the overlay again"
+
+    echo "[6] close Settings cleanly after the queued App Activity change"
     xprop -id "$window" WM_PROTOCOLS || true
     "$close_helper" "$window"
     for _ in $(seq 1 180); do
@@ -148,10 +177,12 @@ xvfb-run -a bash -c '
         echo "Settings exited with an error after the delayed IPC request." >&2
         exit 1
     fi
-    test -f "$AUTOSTART"
-    test -f "$REPLIED"
-    echo "PASS: Settings shutdown drained the queued autostart action after delayed IPC"
-    echo "PASS: Settings closed cleanly after the delayed IPC request"
+    if [[ ! -f "$REPLIED" || "$(cat "$COUNT_FILE")" != "1" ]]; then
+        echo "Delayed IPC did not complete exactly one overlay preview request." >&2
+        cat "$4/settings.log" >&2 || true
+        exit 1
+    fi
+    echo "PASS: Settings closed cleanly after the delayed App Activity update"
 ' _ "$SETTINGS" "$ACCEPTED" "$ROOT/send-wm-delete" "$ROOT"
 
 python3 - <<'PY'
@@ -160,9 +191,11 @@ import os
 from pathlib import Path
 
 config = Path(os.environ["XDG_CONFIG_HOME"]) / "crosshair" / "config.json"
-assert json.loads(config.read_text(encoding="utf-8"))["enabled"] is True
-print("PASS: closing Settings flushed the final auto-saved Enabled state")
+saved = json.loads(config.read_text(encoding="utf-8"))
+assert saved["enabled"] is True
+assert saved["activity_mode"] == "command"
+print("PASS: closing Settings retained the enabled overlay and Command only launch mode")
 PY
 
 echo "PASS: a delayed IPC response does not freeze the Settings event loop"
-echo "PASS: worker shutdown drains a CLI action queued behind in-flight IPC"
+echo "PASS: App Activity metadata changes are saved without an extra overlay preview"
