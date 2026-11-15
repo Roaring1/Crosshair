@@ -44,7 +44,7 @@ CONFIG="$XDG_CONFIG_HOME/crosshair/config.json"
 AUTOSTART="$XDG_CONFIG_HOME/autostart/crosshair.desktop"
 APP_ENTRY="$XDG_DATA_HOME/applications/crosshair.desktop"
 APP_ICON="$XDG_DATA_HOME/icons/hicolor/scalable/apps/crosshair.svg"
-printf '%s\n' '{"sentinel":"retain-me"}' > "$CONFIG"
+printf '%s\n' '{"enabled":true,"auto_save":false,"shape":"cross_dot","size":31,"thickness":4,"gap":6,"color":"#11aabb","monitor_mode":"primary","offset_x":17,"offset_y":-9}' > "$CONFIG"
 
 echo "[1] explicit autostart installation"
 "$BIN" --autostart
@@ -151,6 +151,13 @@ test -f "$AUTOSTART"
 test -f "$APP_ICON"
 test -L "$APP_ENTRY"
 test "$(cat "$ROOT/outside.desktop")" = "outside-preserve"
+python3 - "$CONFIG" <<'PY'
+import json
+import sys
+from pathlib import Path
+assert json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["enabled"] is True
+print("PASS: refused uninstall did not change the saved enabled state")
+PY
 rm "$APP_ENTRY"
 
 echo "[6] uninstall refuses a symlinked icon before removing any other artifact"
@@ -164,6 +171,13 @@ test -f "$XDG_BIN_HOME/crosshair"
 test -f "$XDG_BIN_HOME/crosshair-settings"
 test -f "$AUTOSTART"
 test -L "$APP_ICON"
+python3 - "$CONFIG" <<'PY'
+import json
+import sys
+from pathlib import Path
+assert json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["enabled"] is True
+print("PASS: second refused uninstall also left saved state unchanged")
+PY
 rm "$APP_ICON"
 mv "$ROOT/original-crosshair.svg" "$APP_ICON"
 
@@ -186,6 +200,21 @@ test ! -e "$XDG_BIN_HOME/crosshair"
 test ! -e "$XDG_BIN_HOME/crosshair-settings"
 test ! -e "$APP_ENTRY"
 test ! -e "$APP_ICON"
-test "$(cat "$CONFIG")" = '{"sentinel":"retain-me"}'
+python3 - "$CONFIG" <<'PY'
+import json
+import sys
+from pathlib import Path
+config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert config["enabled"] is False, config
+assert config["auto_save"] is False, config
+assert config["shape"] == "cross_dot", config
+assert config["size"] == 31, config
+assert config["thickness"] == 4, config
+assert config["gap"] == 6, config
+assert config["color"] == "#11aabb", config
+assert config["monitor_mode"] == "primary", config
+assert config["offset_x"] == 17 and config["offset_y"] == -9, config
+print("PASS: uninstall retained appearance and monitor preferences while saving overlay disabled")
+PY
 
-echo "PASS: isolated install/autostart/uninstall lifecycle; config retained and uninstall preflighted"
+echo "PASS: isolated install/autostart/uninstall lifecycle; OFF state retained and uninstall preflighted"

@@ -13,9 +13,9 @@ Native Rust crosshair overlay for Linux and Windows.
 | Windows 10 1607+ / x64 | Win32 layered window and per-user named-pipe IPC | User-confirmed multi-monitor rendering and Settings; hosted installer/tray/overlay tests pass; mixed-DPI, hot-plug and fullscreen acceptance remain separate checks |
 | macOS | — | Not implemented |
 
-The overlay is designed to remain topmost, non-activating and click-through. Settings is a separate Slint application and can close without necessarily closing an enabled overlay.
+The overlay is designed to remain topmost, non-activating and click-through. The overlay daemon exists only while the overlay is enabled. Turning it off removes its windows, closes its IPC endpoint and exits the daemon; an off state is not represented by a hidden resident process. Settings is a separate Slint application and can close while an enabled overlay continues running.
 
-The Windows build includes a native notification-area controller. Linux/Wayland intentionally uses the app UI or explicit CLI commands rather than claiming a portable system tray. No global hotkey service is claimed; KDE/Wayland users can bind `crosshair --toggle` to a compositor shortcut.
+The Windows build includes an optional native notification-area controller. It stays available only when the user explicitly selects **System tray** mode; the overlay daemon still exits when the crosshair is off. The tray's **Exit Crosshair** action hides the overlay and closes the tray controller. Linux/Wayland intentionally uses the app UI or explicit CLI commands rather than claiming a portable system tray. No global hotkey service is claimed; KDE/Wayland users can bind `crosshair --toggle` to a compositor shortcut.
 
 ## Features
 
@@ -24,9 +24,9 @@ The Windows build includes a native notification-area controller. Linux/Wayland 
 - Monitor selection: all, primary, index and connector name; active/cursor-based selection is supported by the Windows path.
 - Live Settings preview, saved profiles and bounded configuration validation.
 - App Activity launch preference: App UI, System tray (Windows), or Command only. Explicit Settings and CLI actions remain available in every mode.
-- On-demand daemon: no overlay process is required while hidden. Login autostart is an explicit opt-in.
+- Strict on-demand overlay lifecycle: no overlay daemon remains while disabled. The optional Windows System tray controller is a separate, explicit launch mode. Login autostart is an explicit opt-in.
 - Local newline-framed IPC on Linux and a per-user local named pipe on Windows.
-- Atomic configuration writes and config retention when the application is uninstalled.
+- Atomic configuration writes; uninstall retains appearance and monitor preferences while leaving the overlay disabled.
 
 ## Build from source
 

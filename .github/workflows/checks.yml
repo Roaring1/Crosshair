@@ -149,6 +149,9 @@ jobs:
       - name: Test Settings responsiveness during delayed IPC
         run: bash tests/settings-async-io-smoke.sh
 
+      - name: Test CLI behavior when the daemon IPC endpoint is unresponsive
+        run: bash tests/cli-ipc-failure-smoke.sh
+
       - name: Test Settings IPC failure and recovery
         run: bash tests/settings-ipc-recovery-smoke.sh
 

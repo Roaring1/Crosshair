@@ -241,6 +241,25 @@ function Wait-ForStatus {
     throw "Timed out waiting for status '$Expected'. Last response: $last"
 }
 
+function Wait-ForNoOverlayDaemon {
+    param([int] $ExceptProcessId = 0)
+    $deadline = [DateTime]::UtcNow.AddSeconds(8)
+    do {
+        $remaining = @(
+            Get-Process -Name "crosshair" -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.Path -eq $Bin -and
+                    ($ExceptProcessId -eq 0 -or $_.Id -ne $ExceptProcessId)
+                }
+        )
+        if ($remaining.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    $pids = ($remaining | ForEach-Object { $_.Id }) -join ", "
+    throw "The overlay is disabled but its daemon process is still running (PIDs: $pids)."
+}
+
 function Stop-Crosshair {
     if (Test-Path -LiteralPath $Bin -PathType Leaf) {
         try {
@@ -449,6 +468,7 @@ try {
         throw ("Tray left-click did not complete its callback/launch path. callback=$callbackTrace launch=$launchTrace; trace: " + ($lastTrayTrace -join " | "))
     }
     $null = Wait-ForStatus "Overlay setting: disabled"
+    Wait-ForNoOverlayDaemon -ExceptProcessId $trayProcess.Id
     # Snapshot before posting: the callback and child spawn can complete in
     # the same scheduler slice as PostMessage, so sampling afterward races a
     # fast successful launch and can mistake it for the baseline.
@@ -554,20 +574,48 @@ try {
     if (-not $status.Contains("Crosshair daemon: running")) {
         throw "Closing Settings unexpectedly stopped the overlay."
     }
-    if (-not [CrosshairSmokeNative]::PostMessage($trayHwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)) {
-        throw "Could not request tray controller shutdown."
+    Write-SmokeLog "[8b/11] select Exit Crosshair from the tray menu and verify full shutdown"
+    $exitTraceBefore = @(Select-String -LiteralPath $trayLog -SimpleMatch "tray: Exit Crosshair: overlay hide completed; closing tray controller" -ErrorAction SilentlyContinue).Count
+    if (-not [CrosshairSmokeNative]::PostMessage($trayHwnd, $trayCallback, [IntPtr]::Zero, [IntPtr]0x0205)) {
+        throw "Could not post the tray right-click callback."
     }
-    if (-not (Wait-ForProcessExit -Process $trayProcess -TimeoutMilliseconds 5000)) {
-        throw "The tray controller did not exit after WM_CLOSE."
+    $menuHwnd = [IntPtr]::Zero
+    $menuDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    while ([DateTime]::UtcNow -lt $menuDeadline -and $menuHwnd -eq [IntPtr]::Zero) {
+        $menuHwnd = [CrosshairSmokeNative]::FindWindow("#32768", $null)
+        if ($menuHwnd -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 }
     }
-    $status = Wait-ForStatus "Overlay: enabled"
-    if (-not $status.Contains("Crosshair daemon: running")) {
-        throw "Exiting the tray unexpectedly stopped the crosshair overlay."
+    if ($menuHwnd -eq [IntPtr]::Zero) {
+        throw "The Crosshair tray context menu did not open."
     }
+    # VK_END selects the final menu entry ("Exit Crosshair"); Enter activates
+    # the same TrackPopupMenu return path used by a real user selection.
+    $null = [CrosshairSmokeNative]::PostMessage($menuHwnd, 0x0100, [IntPtr]0x23, [IntPtr]::Zero)
+    $null = [CrosshairSmokeNative]::PostMessage($menuHwnd, 0x0101, [IntPtr]0x23, [IntPtr]::Zero)
+    $null = [CrosshairSmokeNative]::PostMessage($menuHwnd, 0x0100, [IntPtr]0x0D, [IntPtr]::Zero)
+    $null = [CrosshairSmokeNative]::PostMessage($menuHwnd, 0x0101, [IntPtr]0x0D, [IntPtr]::Zero)
+    if (-not (Wait-ForProcessExit -Process $trayProcess -TimeoutMilliseconds 8000)) {
+        throw "Exit Crosshair did not close the tray controller."
+    }
+    $exitTraceDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    $exitTraceSeen = $false
+    while ([DateTime]::UtcNow -lt $exitTraceDeadline -and -not $exitTraceSeen) {
+        $exitTraceSeen = @(Select-String -LiteralPath $trayLog -SimpleMatch "tray: Exit Crosshair: overlay hide completed; closing tray controller" -ErrorAction SilentlyContinue).Count -gt $exitTraceBefore
+        if (-not $exitTraceSeen) { Start-Sleep -Milliseconds 50 }
+    }
+    if (-not $exitTraceSeen) {
+        throw "Exit Crosshair did not request --hide before closing the tray."
+    }
+    $status = Wait-ForStatus "Crosshair daemon: not running"
+    if (-not $status.Contains("Overlay setting: disabled")) {
+        throw "Exit Crosshair left the overlay enabled: $status"
+    }
+    Wait-ForNoOverlayDaemon
 
-    Write-SmokeLog "[9/11] hide removes the overlay and exits daemon"
+    Write-SmokeLog "[9/11] hide remains idempotent when the overlay daemon is already stopped"
     $null = Invoke-Crosshair -Arguments @("--hide")
     $status = Wait-ForStatus "Crosshair daemon: not running"
+    Wait-ForNoOverlayDaemon
     $saved = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
     if ($saved.enabled) { throw "Hide did not persist enabled=false." }
 
@@ -579,6 +627,7 @@ try {
     if ($status -notmatch "Overlay setting: disabled") {
         throw "Toggle-off did not leave the overlay disabled: $status"
     }
+    Wait-ForNoOverlayDaemon
 
     Write-SmokeLog "[11/11] uninstall through the installed CLI from its own working directory"
     Write-SmokeLog "Launching --uninstall; the deferred helper must remove the install folder after the CLI exits."
@@ -607,7 +656,7 @@ try {
     if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
         throw "Uninstaller removed user configuration."
     }
-    Write-SmokeLog "PASS: Windows install, all three App Activity launch modes, no-console Start Menu UI/tray handoff, native tray cold-start/click toggle/independent exit, explicit Settings access, monitor discovery, named-pipe updates, layered overlay, autostart, hide/toggle-off and uninstall."
+    Write-SmokeLog "PASS: Windows install, all three App Activity launch modes, no-console Start Menu UI/tray handoff, native tray cold-start/toggle-off daemon exit/full Exit Crosshair shutdown, explicit Settings access, monitor discovery, named-pipe updates, layered overlay, autostart, hide/toggle-off and uninstall."
 }
 finally {
     Write-SmokeLog "Entering bounded test cleanup."

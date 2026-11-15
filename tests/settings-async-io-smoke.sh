@@ -107,10 +107,9 @@ xvfb-run -a bash -c '
     done
     test -n "$window"
     initial_height="$(xdotool getwindowgeometry --shell "$window" | sed -n "s/^HEIGHT=//p")"
-    # App Activity adds a persistent General row; the compact first-launch
-    # window is now 348px tall rather than the legacy 280px.
-    test "$initial_height" -ge 320
-    test "$initial_height" -lt 400
+    # Both Settings pages use the same fixed native window geometry.
+    # This keeps controls aligned and avoids resizing when sections expand.
+    test "$initial_height" = 520
 
     echo "[2] wait until Settings sends its initial enabled-overlay preview"
     for _ in $(seq 1 40); do
@@ -124,11 +123,11 @@ xvfb-run -a bash -c '
     xdotool mousemove --window "$window" 280 24 click 1
     sleep 0.2
     responsive_height="$(xdotool getwindowgeometry --shell "$window" | sed -n "s/^HEIGHT=//p")"
-    if [[ "$responsive_height" -lt 500 ]]; then
-        echo "Settings event loop did not process Appearance while IPC was blocked (height=$responsive_height)." >&2
+    if [[ "$responsive_height" != "$initial_height" ]]; then
+        echo "Settings window geometry changed during tab switching while IPC was blocked (initial=$initial_height current=$responsive_height)." >&2
         exit 1
     fi
-    echo "PASS: Appearance resized the window to $responsive_height px while IPC was waiting"
+    echo "PASS: Appearance remained responsive without changing the fixed $responsive_height px window while IPC was waiting"
 
     echo "[4] change App Activity while the original preview request remains in flight"
     xdotool mousemove --window "$window" 75 24 click 1

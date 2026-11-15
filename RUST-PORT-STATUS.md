@@ -1,5 +1,21 @@
 # Native Rust port status
 
+## Lifecycle and Windows centering correction — 2026-11-14
+
+- Windows now treats `enabled = false` as a stopped daemon state. Successful Settings preview updates, persisted configuration updates, reloads, hide/toggle-off and quit all close the overlay windows, stop the per-user named-pipe listener, and exit the daemon. An IPC-only process is not left resident.
+- Settings remains a separate process: closing Settings leaves an enabled overlay running; disabling the overlay from Settings stops the daemon. This is deliberate separation of the editor lifetime from overlay state.
+- The optional Windows System tray controller remains resident only when the user explicitly selects System tray as the App Activity mode. Toggling the overlay off stops the overlay daemon while the tray remains available to turn it on again. The tray's **Exit Crosshair** action now waits for `--hide` to complete before closing the tray; if hiding fails, it keeps the tray available and records the error.
+- Corrected Windows layered-window placement to use the renderer's documented center-relative raster origin directly. The previous formula centered the bitmap a second time and could displace the drawn reticle by roughly half its tiny backing surface. A Windows-native regression covers 96%, 125%, 150%, 175% and 200% DPI, seven shapes, nonzero offsets, and monitor rectangles with negative and positive coordinates.
+- Windows-native tests now exercise both non-persisting Settings preview and persisted config updates that disable the overlay, verifying the daemon stop flag, WM_QUIT delivery, and the distinct persistence semantics. The end-to-end Windows named-pipe test now disables through the actual Settings preview command.
+- Windows smoke adds process-level checks: after tray toggle-off, no overlay daemon process may remain even though the explicitly selected tray controller is still running; Exit Crosshair must stop both; ordinary hide/toggle-off must leave no installed Crosshair process.
+- Corrected the delayed-IPC Linux Settings smoke to test the actual fixed 520px window geometry rather than a stale 320–400px height expectation.
+- CLI IPC handling now distinguishes an absent daemon from a live but unresponsive listener. Hide persists OFF and reports an error when a running daemon fails to acknowledge; status does not falsely print "not running"; toggle does not start a duplicate daemon when a live endpoint is unresponsive; restart, set, reload, profile import and uninstall no longer silently hide active-IPC failures.
+- Uninstall preflights removal targets before changing app state, then hides/stops the overlay and retains appearance/monitor preferences with `enabled=false`. Refused uninstall preflight leaves both installed artifacts and the saved enabled state unchanged. The standalone Windows uninstaller uses `--hide` before its bounded process cleanup.
+- Added a CLI IPC-timeout smoke that holds a fake daemon connection open and verifies hide/status/toggle report uncertainty rather than claiming success or attempting a cold start.
+- Local Nobara verification: 60 Rust tests passed (33 core, 19 CLI, 8 Settings). The full Linux integration workflow passed: all 20 renderer/Cairo parity cases; isolated install/autostart/uninstall, including preflight/no-side-effect and OFF-state preference retention; X11 click-through and cold-start; Settings autostart and overlay lifetime; delayed-IPC responsiveness and shutdown; CLI unresponsive-IPC behavior; IPC failure recovery; rapid edits during socket replacement; Settings close while overlay stays on; and all eight Settings screenshot/interaction captures.
+- Windows-specific compilation and execution of the new native tests and revised tray smoke are pending the Windows GitHub Actions runner. No user installation was replaced and no live Windows processes were changed during this work.
+
+
 ## Latest checkpoint — 2026-11-04
 
 ### Final Settings polish and user acceptance

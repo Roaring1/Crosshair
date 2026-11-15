@@ -16,7 +16,14 @@ $SettingsShortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Program
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 
 if (Test-Path -LiteralPath $InstalledCli -PathType Leaf) {
-    try { & $InstalledCli --quit *> $null } catch {}
+    try {
+        & $InstalledCli --hide *> $null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Crosshair did not acknowledge graceful shutdown; remaining exact-install processes will be closed before removal."
+        }
+    } catch {
+        Write-Warning ("Could not request graceful shutdown: " + $_.Exception.Message)
+    }
 }
 
 # When launched by the in-app Uninstall action, the CLI cannot remove its

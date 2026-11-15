@@ -27,8 +27,16 @@ fn send_command(
     payload: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
     use std::os::unix::net::UnixStream;
-    let mut stream = UnixStream::connect(&paths.socket_file)
-        .map_err(|error| format!("Crosshair overlay is not running: {error}"))?;
+    let mut stream = UnixStream::connect(&paths.socket_file).map_err(|error| {
+        if matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+        ) {
+            format!("Crosshair overlay is not running: {error}")
+        } else {
+            format!("Could not connect to Crosshair overlay IPC: {error}")
+        }
+    })?;
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
     let mut request = serde_json::json!({"cmd": command});
@@ -73,6 +81,10 @@ fn send_command(
     _: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
     Err("This platform's native IPC backend is not implemented yet".into())
+}
+
+fn overlay_is_not_running(error: &str) -> bool {
+    error.starts_with("Crosshair overlay is not running")
 }
 
 fn sibling_executable(name: &str) -> Result<PathBuf, String> {
@@ -164,7 +176,10 @@ fn ensure_running_then(paths: &AppPaths, command: &str) -> Result<(), String> {
         Ok(_) => Ok(()),
         // A cold toggle is a show operation by definition: there is no live
         // state to invert. Starting and then sending "toggle" would turn it OFF.
-        Err(_) => start_enabled(paths),
+        Err(error) if overlay_is_not_running(&error) => start_enabled(paths),
+        Err(error) => Err(format!(
+            "Crosshair may still be running but did not acknowledge {command}: {error}"
+        )),
     }
 }
 
@@ -189,7 +204,7 @@ fn print_status(paths: &AppPaths) -> Result<(), String> {
                 }
             }
         }
-        Err(_) => {
+        Err(error) if overlay_is_not_running(&error) => {
             println!("Crosshair daemon: not running");
             println!(
                 "Overlay setting: {}",
@@ -200,6 +215,11 @@ fn print_status(paths: &AppPaths) -> Result<(), String> {
                 }
             );
         }
+        Err(error) => {
+            return Err(format!(
+                "Could not determine whether the Crosshair daemon is still running: {error}"
+            ));
+        }
     }
     Ok(())
 }
@@ -208,12 +228,25 @@ fn restart_daemon(paths: &AppPaths) -> Result<(), String> {
     let enabled = Config::load(&paths.config_file)
         .map_err(|error| error.to_string())?
         .enabled;
-    if send_command(paths, "quit", None).is_ok() {
-        for _ in 0..120 {
-            if send_command(paths, "status", None).is_err() {
-                break;
+    match send_command(paths, "quit", None) {
+        Ok(_) => {
+            for _ in 0..120 {
+                match send_command(paths, "status", None) {
+                    Ok(_) => thread::sleep(Duration::from_millis(25)),
+                    Err(error) if overlay_is_not_running(&error) => break,
+                    Err(error) => {
+                        return Err(format!(
+                            "Crosshair was asked to stop but its shutdown could not be confirmed: {error}"
+                        ));
+                    }
+                }
             }
-            thread::sleep(Duration::from_millis(25));
+        }
+        Err(error) if overlay_is_not_running(&error) => {}
+        Err(error) => {
+            return Err(format!(
+                "Could not stop the existing Crosshair daemon before restart: {error}"
+            ));
         }
     }
     if enabled {
@@ -230,16 +263,20 @@ fn import_profile(paths: &AppPaths, code: &str) -> Result<(), String> {
     config
         .save_atomic(&paths.config_file)
         .map_err(|error| error.to_string())?;
-    if send_command(
+    match send_command(
         paths,
         "set",
         Some(serde_json::to_value(&config).map_err(|error| error.to_string())?),
-    )
-    .is_ok()
-    {
-        println!("Crosshair profile imported and applied.");
-    } else {
-        println!("Crosshair profile imported. It will be used the next time the overlay is shown.");
+    ) {
+        Ok(_) => println!("Crosshair profile imported and applied."),
+        Err(error) if overlay_is_not_running(&error) => {
+            println!("Crosshair profile imported. It will be used the next time the overlay is shown.");
+        }
+        Err(error) => {
+            return Err(format!(
+                "Profile was saved, but the running overlay did not acknowledge the update: {error}"
+            ));
+        }
     }
     Ok(())
 }
@@ -509,22 +546,22 @@ fn install() -> Result<(), String> {
 
 fn uninstall() -> Result<(), String> {
     let paths = AppPaths::discover().map_err(|error| error.to_string())?;
-    let _ = send_command(&paths, "quit", None);
     let bin_dir = install_bin_dir()?;
 
     #[cfg(target_os = "linux")]
-    {
+    let (cli, settings, autostart, app_entry, app_icon) = {
         let cli = bin_dir.join("crosshair");
         let settings = bin_dir.join("crosshair-settings");
         let autostart = autostart_entry_path()?;
         let app_entry = applications_entry_path()?;
         let app_icon = application_icon_path()?;
-        remove_user_files(&[&cli, &settings, &autostart, &app_entry, &app_icon])
-            .map_err(|error| format!("Could not safely uninstall Crosshair: {error}"))?;
-    }
+        validate_user_file_targets(&[&cli, &settings, &autostart, &app_entry, &app_icon])
+            .map_err(|error| format!("Uninstall targets are not safe: {error}"))?;
+        (cli, settings, autostart, app_entry, app_icon)
+    };
 
     #[cfg(target_os = "windows")]
-    {
+    let cleanup_script = {
         let cleanup_script = bin_dir.join("Uninstall-Crosshair.ps1");
         if !cleanup_script.is_file() {
             return Err(format!(
@@ -532,6 +569,34 @@ fn uninstall() -> Result<(), String> {
                 cleanup_script.display()
             ));
         }
+        cleanup_script
+    };
+
+    // Preflight every removal target before modifying either the live daemon
+    // or retained user configuration. A refused uninstall must be side-effect free.
+    let mut config = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
+    config.enabled = false;
+    config
+        .save_atomic(&paths.config_file)
+        .map_err(|error| format!("Could not save the disabled state before uninstall: {error}"))?;
+    match send_command(&paths, "hide", None) {
+        Ok(_) => {}
+        Err(error) if overlay_is_not_running(&error) => {}
+        Err(error) => {
+            return Err(format!(
+                "Disabled state was saved, but Crosshair did not acknowledge shutdown before uninstall: {error}"
+            ));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        remove_user_files(&[&cli, &settings, &autostart, &app_entry, &app_icon])
+            .map_err(|error| format!("Could not safely uninstall Crosshair: {error}"))?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
         Command::new("powershell.exe")
             .args([
                 "-NoProfile",
@@ -799,27 +864,40 @@ fn run() -> Result<(), String> {
         return ensure_running_then(&paths, "show");
     }
     if args.iter().any(|a| a == "--hide") {
-        if send_command(&paths, "hide", None).is_err() {
-            let mut config = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
-            config.enabled = false;
-            config
-                .save_atomic(&paths.config_file)
-                .map_err(|error| error.to_string())?;
+        let mut config = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
+        config.enabled = false;
+        config
+            .save_atomic(&paths.config_file)
+            .map_err(|error| error.to_string())?;
+        match send_command(&paths, "hide", None) {
+            Ok(_) => return Ok(()),
+            Err(error) if overlay_is_not_running(&error) => return Ok(()),
+            Err(error) => {
+                return Err(format!(
+                    "Disabled state was saved, but the running overlay did not acknowledge shutdown: {error}"
+                ));
+            }
         }
-        return Ok(());
     }
     if args.iter().any(|a| a == "--quit") {
-        let _ = send_command(&paths, "quit", None);
-        return Ok(());
+        match send_command(&paths, "quit", None) {
+            Ok(_) => return Ok(()),
+            Err(error) if overlay_is_not_running(&error) => return Ok(()),
+            Err(error) => return Err(format!("Could not stop Crosshair: {error}")),
+        }
     }
     if args.iter().any(|a| a == "--restart") {
         return restart_daemon(&paths);
     }
     if args.iter().any(|a| a == "--reload") {
-        if send_command(&paths, "reload", None).is_err() {
-            Config::load(&paths.config_file).map_err(|error| error.to_string())?;
+        match send_command(&paths, "reload", None) {
+            Ok(_) => return Ok(()),
+            Err(error) if overlay_is_not_running(&error) => {
+                Config::load(&paths.config_file).map_err(|error| error.to_string())?;
+                return Ok(());
+            }
+            Err(error) => return Err(format!("Could not reload the running overlay: {error}")),
         }
-        return Ok(());
     }
     if args.iter().any(|a| a == "--doctor") {
         println!("Crosshair {APP_VERSION}");
@@ -863,14 +941,40 @@ fn run() -> Result<(), String> {
         config
             .save_atomic(&paths.config_file)
             .map_err(|error| error.to_string())?;
-        let _ = send_command(
+        match send_command(
             &paths,
             "set",
             Some(serde_json::to_value(&config).map_err(|error| error.to_string())?),
-        );
-        return Ok(());
+        ) {
+            Ok(_) => return Ok(()),
+            Err(error) if overlay_is_not_running(&error) => return Ok(()),
+            Err(error) => {
+                return Err(format!(
+                    "Configuration was saved, but the running overlay did not acknowledge the update: {error}"
+                ));
+            }
+        }
     }
     Err("Unknown command. Run crosshair --doctor or open Settings.".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::overlay_is_not_running;
+
+    #[test]
+    fn only_an_explicit_missing_endpoint_allows_cold_start_or_noop_shutdown() {
+        assert!(overlay_is_not_running("Crosshair overlay is not running"));
+        assert!(overlay_is_not_running(
+            "Crosshair overlay is not running: Connection refused"
+        ));
+        assert!(!overlay_is_not_running(
+            "Invalid response from overlay: operation timed out"
+        ));
+        assert!(!overlay_is_not_running(
+            "Could not reach the Crosshair named-pipe listener (Windows error 121)"
+        ));
+    }
 }
 
 fn main() {

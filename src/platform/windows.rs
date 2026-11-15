@@ -5,7 +5,7 @@
 //! Rust rasterizer; WS_EX_TRANSPARENT and WM_NCHITTEST keep input flowing to
 //! the game underneath without activating Crosshair.
 
-use crate::render::render_crosshair_dpi;
+use crate::render::{Raster, render_crosshair_dpi};
 use crate::{APP_ID, APP_VERSION, AppPaths, Config, MonitorDescriptor};
 use serde_json::{Value, json};
 use std::collections::hash_map::DefaultHasher;
@@ -23,8 +23,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, GetLastError,
-    HANDLE, HWND, LPARAM, POINT, SIZE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
+    CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, GENERIC_READ,
+    GENERIC_WRITE, GetLastError, HANDLE, HWND, LPARAM, POINT, SIZE, WAIT_FAILED, WAIT_OBJECT_0,
+    WAIT_TIMEOUT, WPARAM,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
@@ -394,6 +395,18 @@ struct OverlayWindow {
     hwnd: HWND,
 }
 
+fn centered_window_origin(
+    monitor: &windows_sys::Win32::Foundation::RECT,
+    raster: &Raster,
+) -> POINT {
+    let width = monitor.right - monitor.left;
+    let height = monitor.bottom - monitor.top;
+    POINT {
+        x: monitor.left + width / 2 + raster.origin_x,
+        y: monitor.top + height / 2 + raster.origin_y,
+    }
+}
+
 fn update_layered_window(hwnd: HWND, monitor: &Monitor, config: &Config) -> Result<(), String> {
     // Move the HWND onto its target monitor before querying its DPI. This is
     // important when hotplug/reordering reuses a window from another output.
@@ -417,10 +430,7 @@ fn update_layered_window(hwnd: HWND, monitor: &Monitor, config: &Config) -> Resu
     let height = raster.height.max(1);
     let width_i32 = i32::try_from(width).map_err(|_| "Crosshair raster is too wide")?;
     let height_i32 = i32::try_from(height).map_err(|_| "Crosshair raster is too tall")?;
-    let monitor_width = monitor.rect.right - monitor.rect.left;
-    let monitor_height = monitor.rect.bottom - monitor.rect.top;
-    let x = monitor.rect.left + (monitor_width - width_i32) / 2 + raster.origin_x;
-    let y = monitor.rect.top + (monitor_height - height_i32) / 2 + raster.origin_y;
+    let destination = centered_window_origin(&monitor.rect, &raster);
 
     let memory_dc = unsafe { CreateCompatibleDC(null_mut()) };
     if memory_dc.is_null() {
@@ -462,7 +472,6 @@ fn update_layered_window(hwnd: HWND, monitor: &Monitor, config: &Config) -> Resu
         );
     }
     let previous = unsafe { SelectObject(memory_dc, bitmap as HGDIOBJ) };
-    let destination = POINT { x, y };
     let source = POINT { x: 0, y: 0 };
     let size = SIZE {
         cx: width_i32,
@@ -731,6 +740,29 @@ fn merge_config(current: &Config, payload: Value) -> Result<Config, String> {
     Config::from_json(&value.to_string()).map_err(|error| error.to_string())
 }
 
+fn request_daemon_stop(
+    paths: &AppPaths,
+    running: &AtomicBool,
+    main_thread: u32,
+    command: &str,
+) {
+    running.store(false, Ordering::Release);
+    if unsafe { PostThreadMessageW(main_thread, WM_QUIT, 0, 0) } == 0 {
+        trace(
+            paths,
+            &format!(
+                "IPC {command}: stopped flag set, but WM_QUIT post to thread {main_thread} failed (Windows error {})",
+                unsafe { GetLastError() }
+            ),
+        );
+    } else {
+        trace(
+            paths,
+            &format!("IPC {command}: stopped flag set; WM_QUIT posted to thread {main_thread}"),
+        );
+    }
+}
+
 fn process_request(
     request: &[u8],
     config: &Arc<Mutex<Config>>,
@@ -781,14 +813,20 @@ fn process_request(
                 next.save_atomic(&paths.config_file)
                     .map_err(|error| error.to_string())?;
             }
+            let enabled = next.enabled;
             *config.lock().map_err(|_| "Configuration lock poisoned")? = next;
-            unsafe { PostThreadMessageW(main_thread, WM_APP_REFRESH, 0, 0) };
+            if enabled {
+                unsafe { PostThreadMessageW(main_thread, WM_APP_REFRESH, 0, 0) };
+            }
             Ok(json!({"ok": true}))
         }
         "reload" => {
             let next = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
+            let enabled = next.enabled;
             *config.lock().map_err(|_| "Configuration lock poisoned")? = next;
-            unsafe { PostThreadMessageW(main_thread, WM_APP_REFRESH, 0, 0) };
+            if enabled {
+                unsafe { PostThreadMessageW(main_thread, WM_APP_REFRESH, 0, 0) };
+            }
             Ok(json!({"ok": true}))
         }
         "show" | "hide" | "toggle" => {
@@ -806,39 +844,29 @@ fn process_request(
                 .map_err(|error| error.to_string())?;
             let should_stop = command == "hide" || (command == "toggle" && !next.enabled);
             *config.lock().map_err(|_| "Configuration lock poisoned")? = next;
-            if should_stop {
-                running.store(false, Ordering::Release);
-                let posted = unsafe { PostThreadMessageW(main_thread, WM_QUIT, 0, 0) };
-                if posted == 0 {
-                    let error = unsafe { GetLastError() };
-                    trace(
-                        paths,
-                        &format!(
-                            "IPC {command}: stopped flag set, but WM_QUIT post to thread {main_thread} failed (Windows error {error})"
-                        ),
-                    );
-                } else {
-                    trace(
-                        paths,
-                        &format!(
-                            "IPC {command}: stopped flag set; WM_QUIT posted to thread {main_thread}"
-                        ),
-                    );
-                }
-            } else {
+            if !should_stop {
                 unsafe { PostThreadMessageW(main_thread, WM_APP_REFRESH, 0, 0) };
             }
             Ok(json!({"ok": true}))
         }
-        "quit" => {
-            running.store(false, Ordering::Release);
-            unsafe { PostThreadMessageW(main_thread, WM_QUIT, 0, 0) };
-            Ok(json!({"ok": true}))
-        }
+        "quit" => Ok(json!({"ok": true})),
         other => Err(format!("Unknown Crosshair IPC command: {other}")),
     })();
     match result {
-        Ok(value) => (value, command == "quit"),
+        Ok(value) => {
+            // An empty overlay must not leave an IPC-only daemon behind.
+            // This covers Settings preview requests, persisted updates,
+            // reloads, and explicit hide/toggle-off commands.
+            let should_stop = command == "quit"
+                || config
+                    .lock()
+                    .map(|current| !current.enabled)
+                    .unwrap_or(true);
+            if should_stop {
+                request_daemon_stop(paths, running, main_thread, command);
+            }
+            (value, should_stop)
+        }
         Err(error) => (json!({"ok": false, "message": error}), false),
     }
 }
@@ -1047,7 +1075,14 @@ pub fn send_command(
 ) -> Result<Value, String> {
     let name = pipe_name();
     if unsafe { WaitNamedPipeW(name.as_ptr(), PIPE_CONNECT_TIMEOUT_MS) } == 0 {
-        return Err("Crosshair overlay is not running".into());
+        let error = unsafe { GetLastError() };
+        return if error == ERROR_FILE_NOT_FOUND {
+            Err("Crosshair overlay is not running".into())
+        } else {
+            Err(format!(
+                "Could not reach the Crosshair named-pipe listener (Windows error {error})"
+            ))
+        };
     }
     let raw_handle = unsafe {
         CreateFileW(
@@ -1162,6 +1197,36 @@ fn open_settings_from_tray() {
         .spawn();
 }
 
+fn exit_crosshair_from_tray(hwnd: HWND) {
+    let executable = match std::env::current_exe() {
+        Ok(executable) => executable,
+        Err(error) => {
+            tray_trace(&format!("Exit Crosshair could not resolve the CLI path: {error}"));
+            return;
+        }
+    };
+    use std::os::windows::process::CommandExt;
+    let result = Command::new(&executable)
+        .arg("--hide")
+        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match result {
+        Ok(status) if status.success() => {
+            tray_trace("Exit Crosshair: overlay hide completed; closing tray controller");
+            unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+        }
+        Ok(status) => tray_trace(&format!(
+            "Exit Crosshair could not stop the overlay (CLI returned {status}); tray remains open"
+        )),
+        Err(error) => tray_trace(&format!(
+            "Exit Crosshair could not run the overlay shutdown command: {error}; tray remains open"
+        )),
+    }
+}
+
 fn show_tray_menu(hwnd: HWND) {
     tray_trace("opening context menu");
     let menu = unsafe { CreatePopupMenu() };
@@ -1171,7 +1236,7 @@ fn show_tray_menu(hwnd: HWND) {
     }
     let open = wide("Show app UI");
     let toggle = wide("Toggle crosshair");
-    let exit = wide("Exit tray");
+    let exit = wide("Exit Crosshair");
     unsafe {
         AppendMenuW(menu, MF_STRING, TRAY_OPEN_SETTINGS, open.as_ptr());
         AppendMenuW(menu, MF_STRING, TRAY_TOGGLE_CROSSHAIR, toggle.as_ptr());
@@ -1194,9 +1259,7 @@ fn show_tray_menu(hwnd: HWND) {
         match selected {
             TRAY_OPEN_SETTINGS => open_settings_from_tray(),
             TRAY_TOGGLE_CROSSHAIR => launch_tray_action(Some("--toggle")),
-            TRAY_EXIT => {
-                let _ = PostMessageW(hwnd, WM_CLOSE, 0, 0);
-            }
+            TRAY_EXIT => exit_crosshair_from_tray(hwnd),
             _ => {}
         }
     }
@@ -1246,7 +1309,7 @@ unsafe extern "system" fn tray_window_proc(
 
 /// Keep a small native Windows notification-area controller alive independently
 /// from the crosshair overlay and Settings processes. Left-click toggles the
-/// overlay; the context menu exposes Settings, Toggle, and Exit tray.
+/// overlay; the context menu exposes Settings, Toggle, and Exit Crosshair.
 pub fn run_tray() -> Result<(), String> {
     use std::os::windows::process::CommandExt;
 
@@ -1534,16 +1597,24 @@ pub fn run(config: Config, paths: AppPaths) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PIPE_IO_TIMEOUT, create_pipe_server, pipe_name, run, send_command};
+    use super::{
+        PIPE_IO_TIMEOUT, centered_window_origin, create_pipe_server, pipe_name, process_request,
+        run, send_command,
+    };
+    use crate::render::render_crosshair_dpi;
     use crate::{AppPaths, Config};
     use serde_json::json;
     use std::fs;
     use std::os::windows::io::AsRawHandle;
-    use std::sync::Mutex;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
     use std::thread;
     use std::time::{Duration, Instant};
     use windows_sys::Win32::Foundation::{ERROR_PIPE_CONNECTED, GetLastError, HANDLE};
     use windows_sys::Win32::System::Pipes::ConnectNamedPipe;
+    use windows_sys::Win32::UI::WindowsAndMessaging::PM_REMOVE;
 
     static PIPE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1555,6 +1626,148 @@ mod tests {
         let name = String::from_utf16(&first[..first.len() - 1]).unwrap();
         assert!(name.starts_with(r"\\.\pipe\crosshair-"));
         assert!(!name[9..].contains('\\'));
+    }
+
+    #[test]
+    fn windows_overlay_origin_keeps_the_drawn_center_at_monitor_center_at_all_dpi_scales() {
+        fn scaled_offset(value: i16, dpi: u32) -> i32 {
+            let value = i32::from(value) * dpi as i32;
+            if value >= 0 {
+                (value + 48) / 96
+            } else {
+                (value - 48) / 96
+            }
+        }
+
+        let monitors = [
+            windows_sys::Win32::Foundation::RECT {
+                left: 0,
+                top: 0,
+                right: 2560,
+                bottom: 1440,
+            },
+            windows_sys::Win32::Foundation::RECT {
+                left: -1920,
+                top: -1080,
+                right: 0,
+                bottom: 0,
+            },
+            windows_sys::Win32::Foundation::RECT {
+                left: 2560,
+                top: -200,
+                right: 5120,
+                bottom: 1240,
+            },
+        ];
+
+        for dpi in [96, 120, 144, 168, 192] {
+            for shape in ["dot", "cross", "x", "plus", "ring", "dot_ring", "cross_dot"] {
+                let config = Config {
+                    shape: shape.into(),
+                    offset_x: -17,
+                    offset_y: 23,
+                    ..Default::default()
+                };
+                let raster = render_crosshair_dpi(&config, dpi).unwrap();
+                for monitor in &monitors {
+                    let position = centered_window_origin(monitor, &raster);
+                    let center_x = monitor.left + (monitor.right - monitor.left) / 2;
+                    let center_y = monitor.top + (monitor.bottom - monitor.top) / 2;
+                    let drawn_center_x =
+                        position.x + scaled_offset(config.offset_x, dpi) - raster.origin_x;
+                    let drawn_center_y =
+                        position.y + scaled_offset(config.offset_y, dpi) - raster.origin_y;
+                    assert_eq!(
+                        drawn_center_x,
+                        center_x + scaled_offset(config.offset_x, dpi),
+                        "horizontal center mismatch for {shape} at {dpi} DPI"
+                    );
+                    assert_eq!(
+                        drawn_center_y,
+                        center_y + scaled_offset(config.offset_y, dpi),
+                        "vertical center mismatch for {shape} at {dpi} DPI"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn disabling_with_settings_preview_or_persisted_set_stops_the_daemon() {
+        for command in ["preview", "set"] {
+            let directory = tempfile::tempdir().unwrap();
+            let paths = AppPaths {
+                config_dir: directory.path().join("config"),
+                config_file: directory.path().join("config/config.json"),
+                data_dir: directory.path().join("data"),
+                state_dir: directory.path().join("state"),
+                runtime_dir: directory.path().join("runtime"),
+                socket_file: directory.path().join("runtime/unused.sock"),
+                lock_file: directory.path().join("runtime/unused.lock"),
+                log_file: directory.path().join("state/crosshair.log"),
+            };
+            fs::create_dir_all(&paths.config_dir).unwrap();
+            Config {
+                enabled: true,
+                ..Default::default()
+            }
+            .save_atomic(&paths.config_file)
+            .unwrap();
+
+            let config = Arc::new(Mutex::new(Config {
+                enabled: true,
+                ..Default::default()
+            }));
+            let running = Arc::new(AtomicBool::new(true));
+            let main_thread = super::GetCurrentThreadId();
+            let mut queued_message = super::MSG::default();
+            unsafe {
+                super::PeekMessageW(
+                    &mut queued_message,
+                    std::ptr::null_mut(),
+                    0,
+                    0,
+                    super::PM_NOREMOVE,
+                );
+            }
+
+            let request = serde_json::to_vec(&json!({
+                "cmd": command,
+                "payload": {"enabled": false}
+            }))
+            .unwrap();
+            let (response, stopped) =
+                process_request(&request, &config, &paths, &running, main_thread);
+
+            assert_eq!(response["ok"].as_bool(), Some(true));
+            assert!(stopped, "{command} should signal daemon shutdown");
+            assert!(
+                !running.load(Ordering::Acquire),
+                "{command} must not leave an IPC-only daemon running"
+            );
+            assert!(!config.lock().unwrap().enabled);
+            let persisted = Config::load(&paths.config_file).unwrap();
+            assert_eq!(
+                persisted.enabled,
+                command == "preview",
+                "preview stays non-persisting; set persists the disabled state"
+            );
+
+            let mut quit_message = super::MSG::default();
+            assert_ne!(
+                unsafe {
+                    super::PeekMessageW(
+                        &mut quit_message,
+                        std::ptr::null_mut(),
+                        super::WM_QUIT,
+                        super::WM_QUIT,
+                        PM_REMOVE,
+                    )
+                },
+                0,
+                "{command} should post WM_QUIT to the daemon message loop"
+            );
+        }
     }
 
     #[test]
@@ -1685,11 +1898,16 @@ mod tests {
         assert_eq!(persisted.shape, "x");
         assert_eq!(persisted.size, 37);
 
-        send_command(&paths, "hide", None).expect("hide should be acknowledged");
+        send_command(
+            &paths,
+            "preview",
+            Some(json!({"enabled": false})),
+        )
+        .expect("disabling the overlay from Settings preview should be acknowledged");
         let result = worker
             .join()
             .expect("Windows overlay thread should not panic");
-        result.expect("Windows overlay should shut down cleanly after hide");
+        result.expect("Windows overlay should stop cleanly after Settings disables it");
         assert!(
             send_command(&paths, "status", None).is_err(),
             "named pipe must stop accepting requests after daemon shutdown"
