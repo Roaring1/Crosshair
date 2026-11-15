@@ -18,37 +18,45 @@ personal data in a report.
 
 ## Security model
 
-Crosshair is a single-user Linux desktop overlay, not a network service.
+Crosshair is a single-user desktop overlay for Linux and Windows, not a
+network service. Its control interfaces are local to the user's desktop
+session; neither backend opens a listening TCP port.
 
-- The control interface is a Unix-domain socket under the user's runtime
-  directory. The app creates a private runtime subdirectory and a
-  permission-restricted socket.
-- On Linux, IPC clients must have verifiable peer credentials and must run
-  under the same UID as the daemon. The server fails closed if credentials
-  cannot be verified.
-- Config reads refuse symlinks and non-regular files and are capped at
-  1 MiB. Oversized config files are left untouched while in-memory defaults
-  are used. Duplicate JSON keys, non-standard numeric constants and excessive
-  nesting are rejected safely. Config writes use unpredictable exclusive
-  temporary files and rename relative to a pinned, no-follow parent directory
-  descriptor.
-- IPC JSON parsing rejects duplicate keys and non-standard numeric constants;
-  the encoder refuses NaN and Infinity values.
-- Directory modes, lock-file modes, normal log-file modes, and delayed
-  restart-helper log modes are applied through verified file descriptors.
-  Lock and log opens are no-follow and nonblocking; they reject non-regular
-  files. Restart setup closes every acquired descriptor if pipe setup or helper
-  spawning fails. The socket is created with owner-only
-  permissions at bind time. Startup refuses to delete a non-socket entry at
-  the socket path, and shutdown unlinks only the exact socket inode created
-  by that daemon instance.
-- External desktop/system helper programs are resolved only from root-owned
-  system directories and rejected if the current user can write the file or
-  any parent directory. This check accounts for the user's groups and ACLs;
-  PATH entries are not trusted for these helper invocations.
-- The installer writes only to user-level application paths; it does not
-  require root privileges. Legacy systemd files are not removed unless the
-  trusted system manager confirms disable and daemon-reload success.
+- Linux uses a Unix-domain socket under the user's runtime directory. The
+  application creates a private runtime subdirectory and owner-restricted
+  socket. IPC clients must have verifiable peer credentials and run under the
+  same UID as the daemon. The server fails closed if credentials cannot be
+  verified.
+- Windows uses a named pipe whose name is derived from the current domain,
+  username and profile. The server uses the process token's default DACL,
+  creates a non-inheritable pipe handle, requires the first pipe instance, and
+  sets `PIPE_REJECT_REMOTE_CLIENTS`. This restricts access to local clients
+  permitted by the process token's DACL and rejects remote pipe clients.
+- Configuration files are capped at 1 MiB. Both platform readers reject
+  symlink and non-regular config paths before reading. JSON parsing rejects
+  duplicate keys, non-standard numeric constants and excessive nesting; the
+  encoder refuses NaN and Infinity. Writes use an exclusive temporary file and
+  atomic replacement. Linux additionally pins parent directories through
+  no-follow file descriptors, refuses multiply-linked or non-owned targets,
+  and applies owner-private permissions. Windows opens the temporary file
+  exclusively and replaces the destination with `MoveFileExW` write-through
+  semantics.
+- On Linux, directory, lock-file and log-file opens use verified file
+  descriptors, no-follow and nonblocking flags, and private modes. The socket
+  is created with owner-only permissions at bind time. Startup refuses to
+  delete a non-socket entry at the socket path, and shutdown unlinks only the
+  exact socket inode created by that daemon instance. Restart setup closes
+  acquired descriptors if pipe setup or helper spawning fails.
+- On Linux, external desktop/system helper programs are resolved only from
+  root-owned system directories and rejected if the current user can write
+  the executable or any parent directory. The check accounts for groups and
+  ACLs; PATH entries are not trusted for these helper invocations.
+- The Linux installer writes only to user-level application paths and does
+  not require root privileges. Legacy systemd files are not removed unless
+  the trusted system manager confirms disable and daemon-reload success.
+- The Windows installer writes under the current user's `%LOCALAPPDATA%` and
+  `%APPDATA%`, updates only the current user's PATH and startup registry key,
+  and does not require administrator rights.
 
 This is not a security boundary between processes running as the same user.
 Malware or another untrusted process already running with the user's UID can
