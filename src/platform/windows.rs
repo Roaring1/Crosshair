@@ -1327,7 +1327,7 @@ unsafe extern "system" fn tray_window_proc(
 }
 
 fn watch_tray_overlay_state(
-    hwnd: HWND,
+    hwnd: isize,
     paths: AppPaths,
     running: Arc<AtomicBool>,
 ) -> Result<thread::JoinHandle<()>, String> {
@@ -1347,7 +1347,7 @@ fn watch_tray_overlay_state(
                             &paths,
                             "tray watcher: overlay pipe disappeared; closing controller",
                         );
-                        unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+                        unsafe { PostMessageW(hwnd as HWND, WM_CLOSE, 0, 0) };
                         break;
                     }
                     // ERROR_SEM_TIMEOUT means an instance exists but is busy.
@@ -1501,7 +1501,11 @@ pub fn run_tray() -> Result<(), String> {
     }
 
     let watcher_running = Arc::new(AtomicBool::new(true));
-    let watcher = match watch_tray_overlay_state(hwnd, paths.clone(), watcher_running.clone()) {
+    let watcher = match watch_tray_overlay_state(
+        hwnd as isize,
+        paths.clone(),
+        watcher_running.clone(),
+    ) {
         Ok(watcher) => watcher,
         Err(error) => {
             unsafe {
