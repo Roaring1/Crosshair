@@ -1,4 +1,13 @@
-# Native Rust port status
+# Native Rust Crosshair status
+
+## Current project state — 2026-11-14
+
+- Native Rust Crosshair `4.0.0` is now the default implementation on `main`; PR #3 was merged as `825529eb8b4115ad98c05fada6f4de5391cb7318`. The latest `main` tip at this update is `dd912afc19b71f9d58bc6934a9be8fd399d9d570`, which adds only a development dependency pin after the merge.
+- GitHub Actions run [#206](https://github.com/Roaring1/Crosshair/actions/runs/43668433620) passed all eight jobs for the merged implementation. The repository has no open pull requests or issues; the live branch inventory contains only `main`.
+- The Windows 11 laptop was updated from the run #206 x64 package. Both installed executable hashes matched the package. Existing `%APPDATA%\\Crosshair\\config.json` and the user's explicit `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\Crosshair` startup entry were preserved. The saved enabled preference remains true. The daemon was not left running from the remote SSH update session because that process is not the interactive Windows desktop session; launch Crosshair from its Start Menu entry in the signed-in desktop when ready.
+- The Nobara 44 KDE desktop was updated from the merged-main Linux release build. The native installer replaced the CLI and Settings binaries, refreshed the desktop entry and SVG icon, and preserved the user's config and explicit login-autostart preference. Desktop entries passed `desktop-file-validate`. The existing enabled preference remains true. The daemon was left stopped from the remote Supervisor shell rather than launched without the user's active desktop-session environment.
+- Existing rollback copies were retained on both machines. A separate older local checkout with uncommitted work was left untouched; it was not force-reset or discarded.
+- Crosshair is intended for normal use now. Further issues discovered in everyday use should be fixed in small follow-up commits directly on `main`; the remaining platform-specific behavior is not a reason to hold back routine updates.
 
 ## Lifecycle and Windows centering correction — 2026-11-14
 

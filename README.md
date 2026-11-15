@@ -2,7 +2,7 @@
 
 Native Rust crosshair overlay for Linux and Windows.
 
-> **Development-branch notice:** This is the native Rust rewrite on `rust-port` (Cargo version `4.0.0`), not a published stable release. The established Python application and its release history remain on `main`; this branch is a separate implementation. Windows multi-monitor rendering and Settings on Windows/Linux have been user-tested. Some platform-specific fullscreen, pointer-passthrough, DPI and monitor-hotplug checks remain unclaimed. See [RUST-PORT-STATUS.md](RUST-PORT-STATUS.md) for the current validation record.
+> **Project status:** Native Rust Crosshair `4.0.0` is the default implementation on `main` for Linux and Windows. It is in active use and will be improved iteratively as real-world issues are reported. Windows multi-monitor rendering and Settings on Windows/Linux have been user-tested; other platform-specific behavior can be refined through normal follow-up changes. See [RUST-PORT-STATUS.md](RUST-PORT-STATUS.md) for the implementation and deployment history.
 
 ## Platform support
 
@@ -132,7 +132,7 @@ crosshair --uninstall
 
 On Windows, daemon startup, display discovery, overlay creation, and named-pipe request stages are appended to the Crosshair log under `%LOCALAPPDATA%\Crosshair\crosshair.log`.
 
-The legacy Python source in this branch is retained as a compatibility and renderer-parity reference for CI. It is not installed or launched by the native Rust package. The established Python application and its release history remain on `main`.
+Legacy Python source is retained in the repository as a compatibility and renderer-parity reference for CI. It is not installed or launched by the native Rust package. The native Rust application is the default Crosshair implementation on `main` and is what the Linux and Windows installers deploy.
 
 ## Validation
 
