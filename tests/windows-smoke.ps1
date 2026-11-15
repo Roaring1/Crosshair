@@ -45,8 +45,21 @@ using System.Runtime.InteropServices;
 using System.Text;
 public static class CrosshairSmokeNative {
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
     [DllImport("user32.dll", EntryPoint = "PostMessageW", SetLastError = true)]
     public static extern bool PostMessage(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", EntryPoint = "GetWindowRect", SetLastError = true)]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+    [DllImport("user32.dll", EntryPoint = "SetCursorPos", SetLastError = true)]
+    public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll", EntryPoint = "mouse_event", SetLastError = true)]
+    public static extern void MouseEvent(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
     [DllImport("user32.dll", EntryPoint = "FindWindowW", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern IntPtr FindWindow(string className, string windowName);
     [DllImport("user32.dll", EntryPoint = "EnumWindows", SetLastError = true)]
@@ -622,6 +635,7 @@ try {
         throw "Closing Settings unexpectedly stopped the overlay."
     }
     Write-SmokeLog "[8b/11] select Exit Crosshair from the tray menu and verify full shutdown"
+    $selectionTraceBefore = @(Select-String -LiteralPath $trayLog -SimpleMatch "tray: context menu dismissed with selection 3" -ErrorAction SilentlyContinue).Count
     $exitTraceBefore = @(Select-String -LiteralPath $trayLog -SimpleMatch "tray: Exit Crosshair: overlay hide completed; closing tray controller" -ErrorAction SilentlyContinue).Count
     if (-not [CrosshairSmokeNative]::PostMessage($trayHwnd, $trayCallback, [IntPtr]::Zero, [IntPtr]0x0205)) {
         throw "Could not post the tray right-click callback."
@@ -635,14 +649,39 @@ try {
     if ($menuHwnd -eq [IntPtr]::Zero) {
         throw "The Crosshair tray context menu did not open."
     }
-    # VK_END selects the final menu entry ("Exit Crosshair"); Enter activates
-    # the same TrackPopupMenu return path used by a real user selection.
-    $null = [CrosshairSmokeNative]::PostMessage($menuHwnd, 0x0100, [IntPtr]0x23, [IntPtr]::Zero)
-    $null = [CrosshairSmokeNative]::PostMessage($menuHwnd, 0x0101, [IntPtr]0x23, [IntPtr]::Zero)
-    $null = [CrosshairSmokeNative]::PostMessage($menuHwnd, 0x0100, [IntPtr]0x0D, [IntPtr]::Zero)
-    $null = [CrosshairSmokeNative]::PostMessage($menuHwnd, 0x0101, [IntPtr]0x0D, [IntPtr]::Zero)
+    [uint32]$menuOwnerPid = 0
+    $null = [CrosshairSmokeNative]::GetWindowThreadProcessId($menuHwnd, [ref]$menuOwnerPid)
+    if ([int]$menuOwnerPid -ne $trayProcess.Id) {
+        throw "The popup menu belongs to PID $menuOwnerPid instead of the Crosshair tray PID $($trayProcess.Id)."
+    }
+    # TrackPopupMenu runs a modal menu loop; PostMessage keyboard events do
+    # not act like user input there. Click the center of the third menu row
+    # through the real desktop input queue so the Exit command is selected.
+    $menuRect = [CrosshairSmokeNative+RECT]::new()
+    if (-not [CrosshairSmokeNative]::GetWindowRect($menuHwnd, [ref]$menuRect)) {
+        throw "Could not inspect the visible Crosshair tray menu bounds."
+    }
+    $menuWidth = $menuRect.Right - $menuRect.Left
+    $menuHeight = $menuRect.Bottom - $menuRect.Top
+    if ($menuWidth -lt 40 -or $menuHeight -lt 40) {
+        throw "The Crosshair tray menu has invalid bounds: $menuRect."
+    }
+    $exitX = $menuRect.Left + [int]($menuWidth / 2)
+    $exitY = $menuRect.Top + [int](5 * $menuHeight / 6)
+    Write-SmokeLog ("Selecting Exit Crosshair with mouse input at " + $exitX + "," + $exitY + " in menu " + $menuRect)
+    if (-not [CrosshairSmokeNative]::SetCursorPos($exitX, $exitY)) {
+        throw "Could not move the pointer over Exit Crosshair."
+    }
+    Start-Sleep -Milliseconds 100
+    [CrosshairSmokeNative]::MouseEvent(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 50
+    [CrosshairSmokeNative]::MouseEvent(0x0004, 0, 0, 0, [UIntPtr]::Zero)
     if (-not (Wait-ForProcessExit -Process $trayProcess -TimeoutMilliseconds 8000)) {
         throw "Exit Crosshair did not close the tray controller."
+    }
+    $selectionTraceSeen = @(Select-String -LiteralPath $trayLog -SimpleMatch "tray: context menu dismissed with selection 3" -ErrorAction SilentlyContinue).Count -gt $selectionTraceBefore
+    if (-not $selectionTraceSeen) {
+        throw "The tray menu did not return the Exit Crosshair command ID 3."
     }
     $exitTraceDeadline = [DateTime]::UtcNow.AddSeconds(5)
     $exitTraceSeen = $false
