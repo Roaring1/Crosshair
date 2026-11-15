@@ -2,12 +2,25 @@
 
 ## Current project state — 2026-11-14
 
-- Native Rust Crosshair `4.0.0` is now the default implementation on `main`; PR #3 was merged as `825529eb8b4115ad98c05fada6f4de5391cb7318`. The latest `main` tip at this update is `dd912afc19b71f9d58bc6934a9be8fd399d9d570`, which adds only a development dependency pin after the merge.
+- Native Rust Crosshair `4.0.0` is now the default implementation on `main`; PR #3 was merged as `825529eb8b4115ad98c05fada6f4de5391cb7318`. After the merge, `dd912afc19b71f9d58bc6934a9be8fd399d9d570` advanced only the development dependency pin. This status note and the README were then published on `main` as `104f2c03b3a50f28190d72da33de5190b889974c`; the app source tree remains unchanged from the tested merge.
 - GitHub Actions run [#206](https://github.com/Roaring1/Crosshair/actions/runs/43668433620) passed all eight jobs for the merged implementation. The repository has no open pull requests or issues; the live branch inventory contains only `main`.
 - The Windows 11 laptop was updated from the run #206 x64 package. Both installed executable hashes matched the package. Existing `%APPDATA%\\Crosshair\\config.json` and the user's explicit `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\Crosshair` startup entry were preserved. The saved enabled preference remains true. The daemon was not left running from the remote SSH update session because that process is not the interactive Windows desktop session; launch Crosshair from its Start Menu entry in the signed-in desktop when ready.
 - The Nobara 44 KDE desktop was updated from the merged-main Linux release build. The native installer replaced the CLI and Settings binaries, refreshed the desktop entry and SVG icon, and preserved the user's config and explicit login-autostart preference. Desktop entries passed `desktop-file-validate`. The existing enabled preference remains true. The daemon was left stopped from the remote Supervisor shell rather than launched without the user's active desktop-session environment.
 - Existing rollback copies were retained on both machines. A separate older local checkout with uncommitted work was left untouched; it was not force-reset or discarded.
-- Crosshair is intended for normal use now. Further issues discovered in everyday use should be fixed in small follow-up commits directly on `main`; the remaining platform-specific behavior is not a reason to hold back routine updates.
+- Crosshair is in normal use now. Further issues discovered in everyday use should be fixed in small follow-up commits directly on `main`; the remaining platform-specific behavior is not a release gate.
+- The old Python implementation is retained only as a compatibility/reference renderer in the repository. Its pre-Rust baseline is preserved by tag `working-python-2026-10-31`.
+- The Cargo package version is `4.0.0`; no GitHub Release or signed installer has been published. Windows packages are currently delivered by the successful main-branch Actions artifact. No `LICENSE` file has been added; choosing redistribution terms remains an explicit project-owner decision.
+
+## Current capability boundaries
+
+- Linux has native X11 and Wayland backends. There is no Linux system-tray controller; compositor users can bind `crosshair --toggle` to a shortcut.
+- Windows has a native notification-area controller in System tray mode. No global hotkey service is included.
+- macOS is not implemented.
+- Physical-device combinations such as unusual fractional-DPI transitions, hot-plug, fullscreen and sleep/resume are not claimed as individually verified. They are ordinary-use feedback areas, not blockers to using or updating the application.
+
+## Historical engineering log
+
+Entries below preserve the implementation and debugging history as recorded at their respective checkpoints. Older notes that refer to `rust-port`, a draft PR, pending Windows CI, or remaining release gates describe the state at that date and are superseded by the current project state above.
 
 ## Lifecycle and Windows centering correction — 2026-11-14
 
@@ -180,13 +193,13 @@ This repository currently maintains two distinct application implementations:
 
 | Item | Established application | Native rewrite |
 |---|---|---|
-| Git branch | `main` | `rust-port` |
-| Implementation | Python / GTK3 / PyGObject / Cairo | Rust core and native platform backends, Slint Settings UI |
-| Version shown in source/docs | Python core identifies as `3.2.0-candidate`; README describes the v3.2.0 line | Cargo package version `4.0.0` |
-| Release posture | Existing baseline | Draft development branch; not represented as a published Rust release |
-| Current review path | Default branch | Draft PR [#3](https://github.com/Roaring1/Crosshair/pull/3) |
+| Git reference | Historical tag `working-python-2026-10-31` | Default branch `main` |
+| Implementation | Python / GTK3 / PyGObject / Cairo baseline | Rust core and native Linux/Windows backends, Slint Settings UI |
+| Version shown in source/docs | Historical Python baseline | Cargo package version `4.0.0` |
+| Repository posture | Retained for comparison and renderer parity | Active implementation, merged and deployed |
+| Integration | Preserved by the historical tag | PR [#3](https://github.com/Roaring1/Crosshair/pull/3) merged as `825529e` |
 
-The Rust version number is a package version, not evidence that a v4.0.0 release has been published. Keep the Python files and the default branch intact until the native implementation has passed the required platform and real-session validation.
+The Cargo version is the app/package version. The repository currently distributes Windows builds through CI artifacts and has not published a signed installer or formal GitHub Release.
 
 ## Feature comparison
 
@@ -199,10 +212,10 @@ The Rust version number is a package version, not evidence that a v4.0.0 release
 | Linux overlay | GTK / GTK Layer Shell on Wayland and X11 | Native Linux backends for Wayland and X11; compositor-specific behavior still requires a real KDE Wayland pass |
 | Monitor targeting | All, primary, active, index and connector name | All/primary/index/name on both platform paths; cursor-active selection is supported on the native Windows path, while the Wayland backend explicitly fails closed where cursor-active output cannot be queried |
 | IPC / CLI | Local Unix socket and CLI control | Bounded newline-framed local IPC on Linux; per-user named-pipe IPC in the Windows implementation |
-| Install lifecycle | Linux install, optional autostart, uninstall and config retention | Linux install lifecycle smoke coverage; Windows per-user installer, Start Menu shortcut, opt-in Run-key autostart and uninstall preserving config are included in the draft |
+| Install lifecycle | Historical Linux install, optional autostart, uninstall and config retention | Linux and Windows per-user installers, Start Menu/desktop entries, optional login autostart and config-preserving uninstall are in `main` and deployed |
 | System tray | AppIndicator / GTK status icon fallback | Native Win32 notification-area controller in the Rust build; Linux tray remains intentionally unimplemented |
 | Global hotkeys | Platform/compositor-dependent; KDE may bind CLI commands | No global hotkey service is claimed; Wayland users can bind the Rust CLI through compositor shortcuts |
-| Windows overlay | Not part of the Python GTK Linux implementation | Native Win32 layered-window backend and smoke test are now part of the draft branch; Windows CI is the first authoritative compile/runtime gate |
+| Windows overlay | Not part of the Python GTK Linux implementation | Native Win32 layered-window backend is in `main`, covered by Windows CI and installed on the target Windows machine |
 | macOS | Not supported by the current baseline | Not implemented |
 
 ## Current Rust UI changes
@@ -225,12 +238,8 @@ The local Linux checkout has been validated with:
 
 Local Rust formatting and MSVC-target checks were unavailable on the development machine because its installed toolchain does not include `cargo-fmt` or the Windows standard-library target. The draft CI workflow installs a stable Rust toolchain and runs the Windows compile/test path on `windows-latest`; results must be checked before calling the Windows port verified.
 
-## Release gates still open
+## Current release posture
 
-1. Run the full Windows-native compile, tests and install/overlay/Settings/uninstall smoke against the latest branch head; produce and inspect the Windows x64 package artifact.
-2. Verify the Windows x64 package on the user's Windows laptop before removing the draft/release warning.
-3. Validate on a real Nobara/KDE Wayland session: overlay placement, click-through, fullscreen behavior, DPI and multi-monitor transitions, and Settings close/reopen behavior.
-4. Recheck monitor selection and config migration against the established application. Keep the Git Python baseline and user configuration recoverable until this is done.
-5. Decide separately whether tray parity is required for the first Rust release; it is a known gap, not a completed feature.
+The native Rust implementation is merged into `main` and installed on the target Windows 11 and Nobara machines. No additional manual validation is required before using the app or making routine fixes. Report any behavior that is wrong in the actual desktop/game environment and fix it on `main` with a focused regression where practical.
 
-Until those checks pass, keep PR #3 in draft and do not label the Rust rewrite a stable replacement.
+A signed installer, formal GitHub Release, and open-source license are separate publication choices. They are intentionally not implied by the Cargo package version or by the downloadable CI artifact.
