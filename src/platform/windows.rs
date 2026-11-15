@@ -678,6 +678,63 @@ fn refresh_windows(
     Ok(())
 }
 
+const REFRESH_RETRY_MAX_DELAY_MS: u32 = 30_000;
+
+fn next_refresh_retry_delay_ms(previous_delay_ms: u32) -> u32 {
+    if previous_delay_ms == 0 {
+        250
+    } else {
+        previous_delay_ms.saturating_mul(2).min(REFRESH_RETRY_MAX_DELAY_MS)
+    }
+}
+
+fn schedule_refresh_retry(
+    paths: &AppPaths,
+    running: &Arc<AtomicBool>,
+    main_thread: u32,
+    retry_delay_ms: &Arc<AtomicU32>,
+    retry_pending: &Arc<AtomicBool>,
+) {
+    if retry_pending.swap(true, Ordering::AcqRel) {
+        return;
+    }
+
+    let delay_ms = next_refresh_retry_delay_ms(retry_delay_ms.load(Ordering::Acquire));
+    retry_delay_ms.store(delay_ms, Ordering::Release);
+
+    let worker_paths = paths.clone();
+    let worker_running = running.clone();
+    let worker_pending = retry_pending.clone();
+    let spawned = thread::Builder::new()
+        .name("crosshair-windows-refresh-retry".into())
+        .spawn(move || {
+            thread::sleep(Duration::from_millis(u64::from(delay_ms)));
+            worker_pending.store(false, Ordering::Release);
+            if !worker_running.load(Ordering::Acquire) {
+                return;
+            }
+
+            trace(
+                &worker_paths,
+                &format!("overlay refresh: retrying after {delay_ms} ms"),
+            );
+            if unsafe { PostThreadMessageW(main_thread, WM_APP_REFRESH, 0, 0) } == 0 {
+                trace(
+                    &worker_paths,
+                    &last_error("Could not queue the overlay refresh retry"),
+                );
+            }
+        });
+
+    if let Err(error) = spawned {
+        retry_pending.store(false, Ordering::Release);
+        trace(
+            paths,
+            &format!("overlay refresh: could not start retry worker: {error}"),
+        );
+    }
+}
+
 fn pipe_name() -> Vec<u16> {
     let identity = [
         std::env::var("USERDOMAIN").unwrap_or_default(),
@@ -1572,6 +1629,8 @@ pub fn run(config: Config, paths: AppPaths) -> Result<(), String> {
 
     let config = Arc::new(Mutex::new(config));
     let running = Arc::new(AtomicBool::new(true));
+    let refresh_retry_delay_ms = Arc::new(AtomicU32::new(0));
+    let refresh_retry_pending = Arc::new(AtomicBool::new(false));
     let main_thread = unsafe { GetCurrentThreadId() };
     MAIN_THREAD_ID.store(main_thread, Ordering::Release);
 
@@ -1665,6 +1724,19 @@ pub fn run(config: Config, paths: AppPaths) -> Result<(), String> {
                 refresh_windows(&paths, &current, &mut windows, &class_name, instance)
             {
                 eprintln!("Crosshair Windows overlay refresh failed: {error}");
+                trace(
+                    &paths,
+                    &format!("overlay refresh failed; scheduling recovery: {error}"),
+                );
+                schedule_refresh_retry(
+                    &paths,
+                    &running,
+                    main_thread,
+                    &refresh_retry_delay_ms,
+                    &refresh_retry_pending,
+                );
+            } else {
+                refresh_retry_delay_ms.store(0, Ordering::Release);
             }
         } else {
             unsafe {
@@ -1712,6 +1784,20 @@ mod tests {
     use windows_sys::Win32::UI::WindowsAndMessaging::PM_REMOVE;
 
     static PIPE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn display_refresh_retry_backoff_starts_quickly_and_caps_at_thirty_seconds() {
+        let mut delay = 0;
+        let mut observed = Vec::new();
+        for _ in 0..10 {
+            delay = super::next_refresh_retry_delay_ms(delay);
+            observed.push(delay);
+        }
+        assert_eq!(
+            observed,
+            vec![250, 500, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000]
+        );
+    }
 
     #[test]
     fn named_pipe_is_local_and_uses_a_stable_per_user_name() {
