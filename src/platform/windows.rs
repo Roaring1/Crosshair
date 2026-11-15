@@ -23,9 +23,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, GENERIC_READ,
-    GENERIC_WRITE, GetLastError, HANDLE, HWND, LPARAM, POINT, SIZE, WAIT_FAILED, WAIT_OBJECT_0,
-    WAIT_TIMEOUT, WPARAM,
+    CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED,
+    ERROR_SEM_TIMEOUT, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, HWND, LPARAM, POINT, SIZE,
+    WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
@@ -1091,7 +1091,14 @@ pub fn send_command(
         )
     };
     if raw_handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-        return Err(last_error("Could not connect to the Crosshair named pipe"));
+        let error = unsafe { GetLastError() };
+        return if error == ERROR_FILE_NOT_FOUND {
+            Err("Crosshair overlay is not running".into())
+        } else {
+            Err(format!(
+                "Could not connect to the Crosshair named pipe (Windows error {error})"
+            ))
+        };
     }
     // Keep the handle owned by a File while the Win32 overlapped APIs operate
     // on its raw HANDLE. Every request/response shares one monotonic deadline.
@@ -1137,36 +1144,49 @@ fn tray_trace(message: &str) {
     }
 }
 
-fn launch_tray_action(argument: Option<&str>) {
-    let Ok(executable) = std::env::current_exe() else {
-        tray_trace("could not resolve the installed CLI path for a tray action");
-        return;
+fn toggle_crosshair_from_tray(hwnd: HWND) {
+    let executable = match std::env::current_exe() {
+        Ok(executable) => executable,
+        Err(error) => {
+            tray_trace(&format!("tray toggle could not resolve the CLI path: {error}"));
+            return;
+        }
     };
-    let mut command = Command::new(&executable);
-    if let Some(argument) = argument {
-        command.arg(argument);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-    }
-    match command
+    use std::os::windows::process::CommandExt;
+    let result = Command::new(&executable)
+        .arg("--toggle")
+        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(child) => tray_trace(&format!(
-            "launched {} from {} (pid {})",
-            argument.unwrap_or("default action"),
-            executable.display(),
-            child.id()
+        .status();
+    match result {
+        Ok(status) if status.success() => {
+            let paths = match AppPaths::discover() {
+                Ok(paths) => paths,
+                Err(error) => {
+                    tray_trace(&format!(
+                        "toggle completed but config path could not be resolved: {error}"
+                    ));
+                    return;
+                }
+            };
+            match Config::load(&paths.config_file) {
+                Ok(config) if !config.enabled => {
+                    tray_trace("toggle turned the overlay OFF; closing tray controller");
+                    unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+                }
+                Ok(_) => tray_trace("toggle turned the overlay ON; tray controller remains active"),
+                Err(error) => tray_trace(&format!(
+                    "toggle completed but the resulting overlay state could not be read: {error}"
+                )),
+            }
+        }
+        Ok(status) => tray_trace(&format!(
+            "tray toggle was not acknowledged (CLI returned {status}); tray remains available"
         )),
         Err(error) => tray_trace(&format!(
-            "failed to launch {} from {}: {error}",
-            argument.unwrap_or("default action"),
-            executable.display()
+            "could not run the tray toggle command: {error}; tray remains available"
         )),
     }
 }
@@ -1255,7 +1275,7 @@ fn show_tray_menu(hwnd: HWND) {
         tray_trace(&format!("context menu dismissed with selection {selected}"));
         match selected {
             TRAY_OPEN_SETTINGS => open_settings_from_tray(),
-            TRAY_TOGGLE_CROSSHAIR => launch_tray_action(Some("--toggle")),
+            TRAY_TOGGLE_CROSSHAIR => toggle_crosshair_from_tray(hwnd),
             TRAY_EXIT => exit_crosshair_from_tray(hwnd),
             _ => {}
         }
@@ -1275,7 +1295,7 @@ unsafe extern "system" fn tray_window_proc(
                 "notification callback received: event=0x{event:04x}"
             ));
             match event {
-                WM_LBUTTONUP => launch_tray_action(Some("--toggle")),
+                WM_LBUTTONUP => toggle_crosshair_from_tray(hwnd),
                 WM_RBUTTONUP => show_tray_menu(hwnd),
                 _ => tray_trace(&format!(
                     "ignored notification callback event 0x{event:04x}"
@@ -1304,9 +1324,58 @@ unsafe extern "system" fn tray_window_proc(
     }
 }
 
-/// Keep a small native Windows notification-area controller alive independently
-/// from the crosshair overlay and Settings processes. Left-click toggles the
-/// overlay; the context menu exposes Settings, Toggle, and Exit Crosshair.
+fn watch_tray_overlay_state(
+    hwnd: HWND,
+    paths: AppPaths,
+    running: Arc<AtomicBool>,
+) -> Result<thread::JoinHandle<()>, String> {
+    thread::Builder::new()
+        .name("crosshair-tray-state".into())
+        .spawn(move || {
+            let name = pipe_name();
+            let mut warned_unexpected_error = false;
+            while running.load(Ordering::Acquire) {
+                // Waiting for a pipe instance does not connect to it, consume
+                // the daemon's single listener, enumerate displays or write
+                // status traffic to the application log.
+                if unsafe { WaitNamedPipeW(name.as_ptr(), PIPE_CONNECT_TIMEOUT_MS) } == 0 {
+                    let error = unsafe { GetLastError() };
+                    if error == ERROR_FILE_NOT_FOUND {
+                        trace(
+                            &paths,
+                            "tray watcher: overlay pipe disappeared; closing controller",
+                        );
+                        unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+                        break;
+                    }
+                    // ERROR_SEM_TIMEOUT means an instance exists but is busy.
+                    // That is not evidence that the overlay is OFF.
+                    if error != ERROR_SEM_TIMEOUT && !warned_unexpected_error {
+                        trace(
+                            &paths,
+                            &format!(
+                                "tray watcher: pipe error {error}; keeping tray active"
+                            ),
+                        );
+                        warned_unexpected_error = true;
+                    }
+                } else {
+                    warned_unexpected_error = false;
+                }
+                for _ in 0..10 {
+                    if !running.load(Ordering::Acquire) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+        })
+        .map_err(|error| format!("Could not start the tray lifecycle watcher: {error}"))
+}
+
+/// Keep the optional Windows notification-area controller alive only while
+/// the overlay is enabled. Turning the overlay OFF from any control path closes
+/// both the overlay daemon and this controller.
 pub fn run_tray() -> Result<(), String> {
     use std::os::windows::process::CommandExt;
 
@@ -1316,24 +1385,32 @@ pub fn run_tray() -> Result<(), String> {
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let paths = AppPaths::discover().map_err(|error| error.to_string())?;
     let config = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
-    if config.enabled {
-        // A tray launch honors the saved overlay-enabled state as well as the
-        // tray preference. --show is idempotent: it starts a cold overlay or
-        // reveals an existing one without toggling an already-visible one off.
-        let show_result = Command::new(&executable)
-            .arg("--show")
-            .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        match show_result {
-            Ok(status) if status.success() => {}
-            Ok(status) => trace(&paths, &format!("tray startup: --show returned {}", status)),
-            Err(error) => trace(
-                &paths,
-                &format!("tray startup: could not request --show: {error}"),
-            ),
+    if !config.enabled {
+        trace(
+            &paths,
+            "tray startup skipped: overlay is disabled; no background controller will remain",
+        );
+        return Ok(());
+    }
+
+    // The tray is a companion to an enabled overlay, never a background
+    // launcher that remains resident while Crosshair is OFF.
+    let show_result = Command::new(&executable)
+        .arg("--show")
+        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match show_result {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            return Err(format!(
+                "Tray startup could not enable the saved overlay (CLI returned {status})."
+            ));
+        }
+        Err(error) => {
+            return Err(format!("Tray startup could not request --show: {error}"));
         }
     }
     trace(&paths, "tray controller starting");
@@ -1423,31 +1500,48 @@ pub fn run_tray() -> Result<(), String> {
         ));
     }
 
-    trace(
-        &paths,
-        "tray notification-area icon added; entering message loop",
-    );
-    let mut message = MSG::default();
-    loop {
-        let result = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
-        if result == 0 {
-            break;
-        }
-        if result == -1 {
+    let watcher_running = Arc::new(AtomicBool::new(true));
+    let watcher = match watch_tray_overlay_state(hwnd, paths.clone(), watcher_running.clone()) {
+        Ok(watcher) => watcher,
+        Err(error) => {
             unsafe {
+                Shell_NotifyIconW(NIM_DELETE, &data);
                 DestroyWindow(hwnd);
                 if !custom_icon.is_null() {
                     windows_sys::Win32::UI::WindowsAndMessaging::DestroyIcon(custom_icon);
                 }
                 UnregisterClassW(class_name.as_ptr(), instance);
             }
-            return Err(last_error("The Crosshair tray message loop failed"));
+            return Err(error);
+        }
+    };
+
+    trace(
+        &paths,
+        "tray notification-area icon added; entering message loop",
+    );
+    let mut message = MSG::default();
+    let mut loop_error = None;
+    loop {
+        let result = unsafe { GetMessageW(&mut message, null_mut(), 0, 0) };
+        if result == 0 {
+            break;
+        }
+        if result == -1 {
+            loop_error = Some(last_error("The Crosshair tray message loop failed"));
+            watcher_running.store(false, Ordering::Release);
+            unsafe { DestroyWindow(hwnd) };
+            break;
         }
         unsafe {
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
     }
+    watcher_running.store(false, Ordering::Release);
+    watcher
+        .join()
+        .map_err(|_| "Crosshair tray state watcher panicked".to_string())?;
     if !custom_icon.is_null() {
         unsafe { windows_sys::Win32::UI::WindowsAndMessaging::DestroyIcon(custom_icon) };
     }
@@ -1456,6 +1550,9 @@ pub fn run_tray() -> Result<(), String> {
         &paths,
         "tray message loop exited and controller unregistered",
     );
+    if let Some(error) = loop_error {
+        return Err(error);
+    }
     Ok(())
 }
 

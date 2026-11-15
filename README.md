@@ -15,7 +15,7 @@ Native Rust crosshair overlay for Linux and Windows.
 
 The overlay is designed to remain topmost, non-activating and click-through. The overlay daemon exists only while the overlay is enabled. Turning it off removes its windows, closes its IPC endpoint and exits the daemon; an off state is not represented by a hidden resident process. Settings is a separate Slint application and can close while an enabled overlay continues running.
 
-The Windows build includes an optional native notification-area controller. It stays available only when the user explicitly selects **System tray** mode; the overlay daemon still exits when the crosshair is off. The tray's **Exit Crosshair** action hides the overlay and closes the tray controller. Linux/Wayland intentionally uses the app UI or explicit CLI commands rather than claiming a portable system tray. No global hotkey service is claimed; KDE/Wayland users can bind `crosshair --toggle` to a compositor shortcut.
+The Windows build includes an optional native notification-area controller. It is available only while the overlay is enabled and the user explicitly selects **System tray** mode. Turning the overlay off from the tray, Settings or CLI closes both the overlay daemon and tray controller. The Start Menu app launcher opens foreground Settings while OFF as a re-enable path; a direct `--tray` launch exits immediately, leaving no background process. After Settings saves an enabled tray-mode configuration and closes, the tray controller starts. A lightweight wait on the per-user named-pipe endpoint detects external daemon shutdown without periodic status traffic. The tray's **Exit Crosshair** action waits for the overlay shutdown acknowledgement before closing. Linux/Wayland intentionally uses the app UI or explicit CLI commands rather than claiming a portable system tray. No global hotkey service is claimed; KDE/Wayland users can bind `crosshair --toggle` to a compositor shortcut.
 
 ## Features
 
@@ -24,7 +24,7 @@ The Windows build includes an optional native notification-area controller. It s
 - Monitor selection: all, primary, index and connector name; active/cursor-based selection is supported by the Windows path.
 - Live Settings preview, saved profiles and bounded configuration validation.
 - App Activity launch preference: App UI, System tray (Windows), or Command only. Explicit Settings and CLI actions remain available in every mode.
-- Strict on-demand overlay lifecycle: no overlay daemon remains while disabled. The optional Windows System tray controller is a separate, explicit launch mode. Login autostart is an explicit opt-in.
+- Strict on-demand lifecycle: no overlay daemon or Windows tray controller remains while disabled. Tray mode is available only while the overlay is enabled. Login autostart is an explicit opt-in.
 - Local newline-framed IPC on Linux and a per-user local named pipe on Windows.
 - Atomic configuration writes; uninstall retains appearance and monitor preferences while leaving the overlay disabled.
 

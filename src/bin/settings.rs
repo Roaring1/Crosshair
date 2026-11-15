@@ -1072,30 +1072,41 @@ fn focus_existing_settings_window() -> bool {
 }
 
 #[cfg(windows)]
+fn start_tray_controller() -> Result<(), String> {
+    let current = std::env::current_exe().map_err(|error| error.to_string())?;
+    let cli = current
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("crosshair.exe");
+    if !cli.is_file() {
+        return Err(format!(
+            "Crosshair CLI was not found beside Settings: {}",
+            cli.display()
+        ));
+    }
+    use std::os::windows::process::CommandExt;
+    Command::new(cli)
+        .arg("--tray")
+        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Could not start the Crosshair tray: {error}"))?;
+    Ok(())
+}
+
+#[cfg(windows)]
 fn launch_preferred_activity(config: &Config) -> Result<bool, String> {
     match config.activity_mode.as_str() {
         "command" => Ok(true),
+        "tray" if !config.enabled => {
+            // The app launcher should offer a foreground path to turn Crosshair
+            // back on, never leave a tray-only process behind while disabled.
+            Ok(false)
+        }
         "tray" => {
-            let current = std::env::current_exe().map_err(|error| error.to_string())?;
-            let cli = current
-                .parent()
-                .unwrap_or(Path::new("."))
-                .join("crosshair.exe");
-            if !cli.is_file() {
-                return Err(format!(
-                    "Crosshair CLI was not found beside Settings: {}",
-                    cli.display()
-                ));
-            }
-            use std::os::windows::process::CommandExt;
-            Command::new(cli)
-                .arg("--tray")
-                .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .map_err(|error| format!("Could not start the Crosshair tray: {error}"))?;
+            start_tray_controller()?;
             Ok(true)
         }
         _ => Ok(false),
@@ -1546,6 +1557,15 @@ fn run() -> Result<(), String> {
             eprintln!("Could not apply final Settings state after close: {error}");
         }
     }
+    #[cfg(windows)]
+    if final_config.enabled && final_config.activity_mode == "tray" && !uninstalled {
+        // In tray mode the ordinary app launcher opens Settings while OFF so
+        // the user has a foreground way to re-enable Crosshair. Once the
+        // enabled state is saved and Settings closes, hand off to the tray.
+        if let Err(error) = start_tray_controller() {
+            eprintln!("Could not start the Crosshair tray after Settings closed: {error}");
+        }
+    }
     if final_config != previous {
         *config.lock().unwrap() = final_config;
     }
@@ -1562,6 +1582,20 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn disabled_tray_launch_falls_through_to_foreground_settings() {
+        let config = Config {
+            enabled: false,
+            activity_mode: "tray".into(),
+            ..Default::default()
+        };
+        assert!(
+            !launch_preferred_activity(&config).unwrap(),
+            "a disabled tray-mode launch must show Settings, not spawn a background tray"
+        );
+    }
 
     #[test]
     fn kde_accent_prefers_plasma_general_accent_color() {

@@ -242,15 +242,11 @@ function Wait-ForStatus {
 }
 
 function Wait-ForNoOverlayDaemon {
-    param([int] $ExceptProcessId = 0)
     $deadline = [DateTime]::UtcNow.AddSeconds(8)
     do {
         $remaining = @(
             Get-Process -Name "crosshair" -ErrorAction SilentlyContinue |
-                Where-Object {
-                    $_.Path -eq $Bin -and
-                    ($ExceptProcessId -eq 0 -or $_.Id -ne $ExceptProcessId)
-                }
+                Where-Object { $_.Path -eq $Bin }
         )
         if ($remaining.Count -eq 0) { return }
         Start-Sleep -Milliseconds 100
@@ -258,6 +254,46 @@ function Wait-ForNoOverlayDaemon {
 
     $pids = ($remaining | ForEach-Object { $_.Id }) -join ", "
     throw "The overlay is disabled but its daemon process is still running (PIDs: $pids)."
+}
+
+function Start-TrayController {
+    $launcher = Start-Process -FilePath $Settings -ArgumentList "--launch" -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru
+    if (-not (Wait-ForProcessExit -Process $launcher -TimeoutMilliseconds 5000)) {
+        throw "The System tray Start Menu launcher did not hand off promptly."
+    }
+    if ($launcher.ExitCode -ne 0) {
+        throw "The System tray launcher failed with exit code $($launcher.ExitCode)."
+    }
+
+    $hwnd = [IntPtr]::Zero
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while ([DateTime]::UtcNow -lt $deadline -and $hwnd -eq [IntPtr]::Zero) {
+        $hwnd = [CrosshairSmokeNative]::FindWindow("CrosshairRustTrayWindow", "Crosshair Tray Controller")
+        if ($hwnd -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 100 }
+    }
+    if ($hwnd -eq [IntPtr]::Zero) {
+        throw "The System tray launcher did not create the Crosshair tray controller."
+    }
+
+    [uint32]$ownerPid = 0
+    $null = [CrosshairSmokeNative]::GetWindowThreadProcessId($hwnd, [ref]$ownerPid)
+    $process = Get-Process -Id ([int]$ownerPid) -ErrorAction Stop
+    if ($process.ProcessName -ne "crosshair") {
+        throw "Crosshair tray controller window belongs to an unexpected process."
+    }
+    $status = Wait-ForStatus "Overlay: enabled"
+    if (-not $status.Contains("Crosshair daemon: running")) {
+        throw "Tray startup did not start the saved enabled overlay from a cold state."
+    }
+    return [PSCustomObject]@{ Hwnd = $hwnd; Process = $process }
+}
+
+function Assert-NoTrayController {
+    $hwnd = [CrosshairSmokeNative]::FindWindow("CrosshairRustTrayWindow", "Crosshair Tray Controller")
+    if ($hwnd -ne [IntPtr]::Zero) {
+        throw "A tray controller remained alive while the saved overlay state was OFF."
+    }
+    Wait-ForNoOverlayDaemon
 }
 
 function Stop-Crosshair {
@@ -410,82 +446,93 @@ try {
     }
     $status = Wait-ForStatus "Overlay: enabled"
 
-    Write-SmokeLog "[6/11] tray launch cold-starts an enabled overlay, then independently toggles it"
-    # Stop the daemon, then restore enabled=true directly in the isolated test
-    # config. Starting the tray from this state proves it shows an enabled
-    # crosshair even when no overlay process exists yet.
+    Write-SmokeLog "[6/11] OFF state has no tray process, even when tray mode is the saved launch preference"
     $null = Invoke-Crosshair -Arguments @("--hide")
     $null = Wait-ForStatus "Crosshair daemon: not running"
+    $disabledTray = Start-Process -FilePath $Bin -ArgumentList "--tray" -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru
+    if (-not (Wait-ForProcessExit -Process $disabledTray -TimeoutMilliseconds 5000)) {
+        throw "The direct --tray command remained resident while the overlay was OFF."
+    }
+    if ($disabledTray.ExitCode -ne 0) {
+        throw "The disabled direct --tray command failed with exit code $($disabledTray.ExitCode)."
+    }
+    Assert-NoTrayController
+
+    $disabledLauncher = Start-Process -FilePath $Settings -ArgumentList "--launch" -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru
+    $recoverySettingsHwnd = [IntPtr]::Zero
+    $recoveryDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    while ([DateTime]::UtcNow -lt $recoveryDeadline -and $recoverySettingsHwnd -eq [IntPtr]::Zero) {
+        $windows = @([CrosshairSmokeNative]::FindVisibleWindowsForProcess($disabledLauncher.Id, "Crosshair Settings"))
+        if ($windows.Count -gt 0) { $recoverySettingsHwnd = [IntPtr]$windows[0] }
+        if ($recoverySettingsHwnd -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 100 }
+    }
+    if ($recoverySettingsHwnd -eq [IntPtr]::Zero) {
+        throw "Tray mode while OFF did not open foreground Settings as a re-enable path."
+    }
+    if (-not [CrosshairSmokeNative]::PostMessage($recoverySettingsHwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)) {
+        throw "Could not close foreground Settings after validating the OFF-state recovery path."
+    }
+    if (-not (Wait-ForProcessExit -Process $disabledLauncher -TimeoutMilliseconds 8000)) {
+        throw "Foreground Settings did not close cleanly after the OFF-state recovery-path check."
+    }
+    Start-Sleep -Milliseconds 300
+    Assert-NoTrayController
+
+    # Restore enabled=true only in the isolated test config to verify that a
+    # cold System tray launch starts the overlay before creating its controller.
     $saved = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
     $saved.enabled = $true
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [IO.File]::WriteAllText($ConfigPath, ($saved | ConvertTo-Json -Depth 16), $utf8NoBom)
-    $trayLauncher = Start-Process -FilePath $Settings -ArgumentList "--launch" -WorkingDirectory $InstallDir -WindowStyle Hidden -PassThru
-    if (-not (Wait-ForProcessExit -Process $trayLauncher -TimeoutMilliseconds 5000)) {
-        throw "The System tray Start Menu launcher did not hand off promptly."
-    }
-    if ($trayLauncher.ExitCode -ne 0) { throw "The System tray launcher failed with exit code $($trayLauncher.ExitCode)." }
-    $trayHwnd = [IntPtr]::Zero
-    $trayDeadline = [DateTime]::UtcNow.AddSeconds(10)
-    while ([DateTime]::UtcNow -lt $trayDeadline -and $trayHwnd -eq [IntPtr]::Zero) {
-        $trayHwnd = [CrosshairSmokeNative]::FindWindow("CrosshairRustTrayWindow", "Crosshair Tray Controller")
-        if ($trayHwnd -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 100 }
-    }
-    if ($trayHwnd -eq [IntPtr]::Zero) {
-        throw "The System tray Start Menu launcher did not create the Crosshair tray controller."
-    }
-    [uint32]$trayOwnerPid = 0
-    $null = [CrosshairSmokeNative]::GetWindowThreadProcessId($trayHwnd, [ref]$trayOwnerPid)
-    $trayProcess = Get-Process -Id ([int]$trayOwnerPid) -ErrorAction Stop
-    if ($trayProcess.ProcessName -ne "crosshair") {
-        throw "Crosshair tray controller window belongs to an unexpected process."
-    }
-    $status = Wait-ForStatus "Overlay: enabled"
-    if (-not $status.Contains("Crosshair daemon: running")) {
-        throw "Tray startup did not start the saved enabled overlay from a cold state."
-    }
+    $tray = Start-TrayController
+    $trayHwnd = $tray.Hwnd
+    $trayProcess = $tray.Process
     $trayCallback = 0x8000 + 41
     $wmLeftButtonUp = 0x0202
+    $trayLog = Join-Path $env:LOCALAPPDATA "Crosshair\crosshair.log"
+
+    Write-SmokeLog "[6a/11] external --hide closes both the daemon and an already-open tray"
+    $null = Invoke-Crosshair -Arguments @("--hide")
+    $null = Wait-ForStatus "Crosshair daemon: not running"
+    if (-not (Wait-ForProcessExit -Process $trayProcess -TimeoutMilliseconds 8000)) {
+        throw "The tray controller remained resident after an external --hide."
+    }
+    Assert-NoTrayController
+
+    Write-SmokeLog "[6b/11] tray left-click toggles OFF and closes its own controller"
+    $null = Invoke-Crosshair -Arguments @("--show")
+    $tray = Start-TrayController
+    $trayHwnd = $tray.Hwnd
+    $trayProcess = $tray.Process
+    $callbackTraceBefore = @(Select-String -LiteralPath $trayLog -SimpleMatch "tray: notification callback received: event=0x0202" -ErrorAction SilentlyContinue).Count
+    $toggleOffTraceBefore = @(Select-String -LiteralPath $trayLog -SimpleMatch "tray: toggle turned the overlay OFF; closing tray controller" -ErrorAction SilentlyContinue).Count
     if (-not [CrosshairSmokeNative]::PostMessage($trayHwnd, $trayCallback, [IntPtr]::Zero, [IntPtr]$wmLeftButtonUp)) {
         throw "Could not post the tray icon left-click callback."
     }
-    $trayLog = Join-Path $env:LOCALAPPDATA "Crosshair\crosshair.log"
-    $callbackDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    $callbackDeadline = [DateTime]::UtcNow.AddSeconds(8)
     $callbackTrace = $false
-    $launchTrace = $false
-    while ([DateTime]::UtcNow -lt $callbackDeadline -and (-not $callbackTrace -or -not $launchTrace)) {
-        if (Test-Path -LiteralPath $trayLog -PathType Leaf) {
-            $trayTraceText = Get-Content -LiteralPath $trayLog -Raw
-            $callbackTrace = $trayTraceText.Contains("tray: notification callback received: event=0x0202")
-            $launchTrace = $trayTraceText.Contains("tray: launched --toggle from ")
-        }
-        if (-not $callbackTrace -or -not $launchTrace) { Start-Sleep -Milliseconds 50 }
+    $toggleOffTrace = $false
+    while ([DateTime]::UtcNow -lt $callbackDeadline -and (-not $callbackTrace -or -not $toggleOffTrace)) {
+        $callbackTrace = @(Select-String -LiteralPath $trayLog -SimpleMatch "tray: notification callback received: event=0x0202" -ErrorAction SilentlyContinue).Count -gt $callbackTraceBefore
+        $toggleOffTrace = @(Select-String -LiteralPath $trayLog -SimpleMatch "tray: toggle turned the overlay OFF; closing tray controller" -ErrorAction SilentlyContinue).Count -gt $toggleOffTraceBefore
+        if (-not $callbackTrace -or -not $toggleOffTrace) { Start-Sleep -Milliseconds 50 }
     }
-    if (-not $callbackTrace -or -not $launchTrace) {
-        $lastTrayTrace = if (Test-Path -LiteralPath $trayLog -PathType Leaf) {
-            Get-Content -LiteralPath $trayLog | Where-Object { $_ -match "tray:" } | Select-Object -Last 30
-        } else { @("No Crosshair application log was created.") }
-        throw ("Tray left-click did not complete its callback/launch path. callback=$callbackTrace launch=$launchTrace; trace: " + ($lastTrayTrace -join " | "))
+    if (-not $callbackTrace -or -not $toggleOffTrace) {
+        $lastTrayTrace = Get-Content -LiteralPath $trayLog | Where-Object { $_ -match "tray:" } | Select-Object -Last 30
+        throw ("Tray toggle did not complete its acknowledged OFF path. callback=$callbackTrace toggleOff=$toggleOffTrace; trace: " + ($lastTrayTrace -join " | "))
     }
-    $null = Wait-ForStatus "Overlay setting: disabled"
-    Wait-ForNoOverlayDaemon -ExceptProcessId $trayProcess.Id
-    # Snapshot before posting: the callback and child spawn can complete in
-    # the same scheduler slice as PostMessage, so sampling afterward races a
-    # fast successful launch and can mistake it for the baseline.
-    $toggleTraceCountBefore = @(Select-String -LiteralPath $trayLog -SimpleMatch "tray: launched --toggle from " -ErrorAction SilentlyContinue).Count
-    if (-not [CrosshairSmokeNative]::PostMessage($trayHwnd, $trayCallback, [IntPtr]::Zero, [IntPtr]$wmLeftButtonUp)) {
-        throw "Could not post the second tray icon left-click callback."
+    $null = Wait-ForStatus "Crosshair daemon: not running"
+    if (-not (Wait-ForProcessExit -Process $trayProcess -TimeoutMilliseconds 8000)) {
+        throw "The tray controller remained resident after its own toggle turned the overlay OFF."
     }
-    $secondCallbackDeadline = [DateTime]::UtcNow.AddSeconds(5)
-    while ([DateTime]::UtcNow -lt $secondCallbackDeadline) {
-        $toggleTraceCount = @(Select-String -LiteralPath $trayLog -SimpleMatch "tray: launched --toggle from " -ErrorAction SilentlyContinue).Count
-        if ($toggleTraceCount -gt $toggleTraceCountBefore) { break }
-        Start-Sleep -Milliseconds 50
-    }
-    if ($toggleTraceCount -le $toggleTraceCountBefore) {
-        throw "The second tray click did not launch its toggle action."
-    }
-    $status = Wait-ForStatus "Overlay: enabled"
+    Assert-NoTrayController
+
+    # Re-enable and relaunch tray for the independent Settings-close and
+    # explicit Exit Crosshair menu acceptance steps below.
+    $null = Invoke-Crosshair -Arguments @("--show")
+    $tray = Start-TrayController
+    $trayHwnd = $tray.Hwnd
+    $trayProcess = $tray.Process
 
     Write-SmokeLog "[7/11] open Settings explicitly while the tray is the saved default"
     $before = @(Get-Process -Name "crosshair-settings" -ErrorAction SilentlyContinue |
