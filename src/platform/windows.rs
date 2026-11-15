@@ -1853,13 +1853,13 @@ pub fn run(config: Config, paths: AppPaths) -> Result<(), String> {
 mod tests {
     use super::{
         PIPE_IO_TIMEOUT, centered_window_origin, create_pipe_server, pipe_name, process_request,
-        run, send_command,
+        run, send_command, wait_for_client_ack,
     };
     use crate::render::render_crosshair_dpi;
     use crate::{AppPaths, Config};
     use serde_json::json;
-    use std::fs;
-    use std::os::windows::io::AsRawHandle;
+    use std::fs::{self, File};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -1867,6 +1867,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
     use windows_sys::Win32::Foundation::{ERROR_PIPE_CONNECTED, GetLastError, HANDLE};
+    use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING};
     use windows_sys::Win32::System::Pipes::ConnectNamedPipe;
     use windows_sys::Win32::UI::WindowsAndMessaging::PM_REMOVE;
 
@@ -2101,6 +2102,64 @@ mod tests {
         server
             .join()
             .expect("silent test server should exit cleanly");
+    }
+
+    #[test]
+    fn windows_named_pipe_server_times_out_when_client_never_acknowledges() {
+        let _pipe_guard = PIPE_TEST_LOCK.lock().unwrap();
+        let name = pipe_name();
+        let listener = create_pipe_server(&name, true)
+            .expect("missing-ack named-pipe test server should be created");
+        let server = thread::spawn(move || {
+            let handle = listener.as_raw_handle() as HANDLE;
+            let connected = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
+            if connected == 0 {
+                let error = unsafe { GetLastError() };
+                assert_eq!(
+                    error, ERROR_PIPE_CONNECTED,
+                    "named-pipe client should connect to the waiting test server"
+                );
+            }
+
+            let started = Instant::now();
+            let result = wait_for_client_ack(handle, started + Duration::from_millis(75));
+            let elapsed = started.elapsed();
+            unsafe { super::DisconnectNamedPipe(handle) };
+            (result, elapsed)
+        });
+
+        let raw_handle = unsafe {
+            super::CreateFileW(
+                name.as_ptr(),
+                super::GENERIC_READ | super::GENERIC_WRITE,
+                0,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(
+            raw_handle,
+            windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE,
+            "named-pipe test client should connect"
+        );
+        let client = unsafe { File::from_raw_handle(raw_handle as _) };
+
+        let (result, elapsed) = server
+            .join()
+            .expect("missing-ack server thread should exit cleanly");
+        assert!(
+            result
+                .expect_err("a client that sends no acknowledgement must time out")
+                .contains("Timed out waiting"),
+            "server should report the bounded acknowledgement timeout"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "missing acknowledgement held the server too long: {elapsed:?}"
+        );
+        drop(client);
     }
 
     #[test]
