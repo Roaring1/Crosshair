@@ -42,8 +42,8 @@ use windows_sys::Win32::System::Console::FreeConsole;
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PeekNamedPipe, PIPE_READMODE_BYTE,
-    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT, WaitNamedPipeW,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT, PeekNamedPipe, WaitNamedPipeW,
 };
 use windows_sys::Win32::System::Registry::{
     HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
@@ -954,24 +954,13 @@ fn wait_for_client_ack(handle: HANDLE, deadline: Instant) -> Result<(), String> 
         if available > 0 {
             let mut acknowledgement = 0u8;
             let mut read = 0u32;
-            if unsafe {
-                ReadFile(
-                    handle,
-                    &mut acknowledgement,
-                    1,
-                    &mut read,
-                    null_mut(),
-                )
-            } == 0
-            {
+            if unsafe { ReadFile(handle, &mut acknowledgement, 1, &mut read, null_mut()) } == 0 {
                 return Err(last_error(
                     "Could not read the Crosshair named-pipe acknowledgement",
                 ));
             }
             if read != 1 || acknowledgement != PIPE_RESPONSE_ACK {
-                return Err(
-                    "Crosshair client sent an invalid named-pipe acknowledgement".into(),
-                );
+                return Err("Crosshair client sent an invalid named-pipe acknowledgement".into());
             }
             return Ok(());
         }
@@ -1041,7 +1030,10 @@ fn named_pipe_server(
                 bytes.push(b'\n');
                 match file.write_all(&bytes).and_then(|()| file.flush()) {
                     Ok(()) => {
-                        trace(&paths, "IPC response written; waiting for client acknowledgement");
+                        trace(
+                            &paths,
+                            "IPC response written; waiting for client acknowledgement",
+                        );
                         true
                     }
                     Err(error) => {
@@ -1051,7 +1043,10 @@ fn named_pipe_server(
                 }
             }
             Err(error) => {
-                trace(&paths, &format!("IPC response serialization failed: {error}"));
+                trace(
+                    &paths,
+                    &format!("IPC response serialization failed: {error}"),
+                );
                 false
             }
         };
