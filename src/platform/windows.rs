@@ -42,7 +42,7 @@ use windows_sys::Win32::System::Console::FreeConsole;
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PeekNamedPipe, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT, WaitNamedPipeW,
 };
 use windows_sys::Win32::System::Registry::{
@@ -925,6 +925,66 @@ fn process_request(
     }
 }
 
+const PIPE_RESPONSE_ACK: u8 = 0x06;
+
+/// Do not disconnect a named-pipe instance until the client has consumed the
+/// complete response. In particular, shutdown requests post WM_QUIT while the
+/// main thread is still running; without this acknowledgement, the daemon can
+/// close its pipe as soon as it writes the response, discarding bytes that the
+/// CLI has not read yet (ERROR_PIPE_NOT_CONNECTED / 233).
+fn wait_for_client_ack(handle: HANDLE, deadline: Instant) -> Result<(), String> {
+    loop {
+        let mut available = 0u32;
+        if unsafe {
+            PeekNamedPipe(
+                handle,
+                null_mut(),
+                0,
+                null_mut(),
+                &mut available,
+                null_mut(),
+            )
+        } == 0
+        {
+            return Err(last_error(
+                "Could not inspect the Crosshair named-pipe acknowledgement",
+            ));
+        }
+
+        if available > 0 {
+            let mut acknowledgement = 0u8;
+            let mut read = 0u32;
+            if unsafe {
+                ReadFile(
+                    handle,
+                    &mut acknowledgement,
+                    1,
+                    &mut read,
+                    null_mut(),
+                )
+            } == 0
+            {
+                return Err(last_error(
+                    "Could not read the Crosshair named-pipe acknowledgement",
+                ));
+            }
+            if read != 1 || acknowledgement != PIPE_RESPONSE_ACK {
+                return Err(
+                    "Crosshair client sent an invalid named-pipe acknowledgement".into(),
+                );
+            }
+            return Ok(());
+        }
+
+        if Instant::now() >= deadline {
+            return Err(
+                "Timed out waiting for the Crosshair client to acknowledge its response".into(),
+            );
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
 fn named_pipe_server(
     first_pipe: File,
     config: Arc<Mutex<Config>>,
@@ -976,11 +1036,33 @@ fn named_pipe_server(
                 json!({"ok": false, "message": format!("Invalid IPC frame: {error}")})
             }
         };
-        if let Ok(mut bytes) = serde_json::to_vec(&response) {
-            bytes.push(b'\n');
-            let _ = file.write_all(&bytes);
-            let _ = file.flush();
-            trace(&paths, "IPC response written");
+        let response_written = match serde_json::to_vec(&response) {
+            Ok(mut bytes) => {
+                bytes.push(b'\n');
+                match file.write_all(&bytes).and_then(|()| file.flush()) {
+                    Ok(()) => {
+                        trace(&paths, "IPC response written; waiting for client acknowledgement");
+                        true
+                    }
+                    Err(error) => {
+                        trace(&paths, &format!("IPC response write failed: {error}"));
+                        false
+                    }
+                }
+            }
+            Err(error) => {
+                trace(&paths, &format!("IPC response serialization failed: {error}"));
+                false
+            }
+        };
+        if response_written {
+            match wait_for_client_ack(handle, Instant::now() + PIPE_IO_TIMEOUT) {
+                Ok(()) => trace(&paths, "IPC client acknowledged response"),
+                Err(error) => trace(
+                    &paths,
+                    &format!("IPC response acknowledgement failed: {error}"),
+                ),
+            }
         }
         unsafe { DisconnectNamedPipe(handle) };
     }
@@ -1176,6 +1258,14 @@ pub fn send_command(
     write_pipe_bytes(handle, &bytes, deadline)?;
     let response = read_pipe_line(handle, deadline)
         .map_err(|error| format!("Invalid response from Crosshair: {error}"))?;
+    // The server keeps this pipe instance connected until the complete response
+    // has been consumed. This is essential for shutdown commands, which may
+    // terminate the daemon's message loop immediately after the response write.
+    // Receiving the complete response resolves this command. A failed ACK
+    // only affects server-side disconnect timing, so it must not turn a
+    // delivered success into a false CLI failure. This also remains compatible
+    // with an older daemon that disconnects immediately after writing.
+    let _ = write_pipe_bytes(handle, &[PIPE_RESPONSE_ACK], deadline);
     let response: Value = serde_json::from_slice(&response).map_err(|error| error.to_string())?;
     if response.get("ok").and_then(Value::as_bool) != Some(true) {
         return Err(response
@@ -2083,8 +2173,8 @@ mod tests {
         assert_eq!(persisted.shape, "x");
         assert_eq!(persisted.size, 37);
 
-        send_command(&paths, "preview", Some(json!({"enabled": false})))
-            .expect("disabling the overlay from Settings preview should be acknowledged");
+        send_command(&paths, "hide", None)
+            .expect("CLI hide should receive its response before the named pipe disconnects");
         let result = worker
             .join()
             .expect("Windows overlay thread should not panic");

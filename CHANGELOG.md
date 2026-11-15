@@ -1,5 +1,11 @@
 # Changelog
 
+## Native Rust reliability maintenance — 2026-11-15
+
+- **Fixed:** Windows named-pipe responses now use a bounded client acknowledgement before the server disconnects a request. Shutdown commands can no longer lose their final CLI response when the daemon exits immediately after writing it.
+- **Hardened:** the Windows named-pipe integration test exercises the actual `hide` command and verifies the shutdown acknowledgement before the daemon and pipe terminate.
+- **Documented:** the security policy now distinguishes Linux Unix-socket and no-follow file operations from Windows per-user named-pipe ACL, remote-client rejection and atomic config replacement behavior.
+
 ## Native Rust mainline migration — Cargo 4.0.0
 
 - Replaced the default Python/GTK application path with the native Rust application for Linux and Windows.
