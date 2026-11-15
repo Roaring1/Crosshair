@@ -230,16 +230,26 @@ fn restart_daemon(paths: &AppPaths) -> Result<(), String> {
         .enabled;
     match send_command(paths, "quit", None) {
         Ok(_) => {
+            let mut stopped = false;
             for _ in 0..120 {
                 match send_command(paths, "status", None) {
                     Ok(_) => thread::sleep(Duration::from_millis(25)),
-                    Err(error) if overlay_is_not_running(&error) => break,
+                    Err(error) if overlay_is_not_running(&error) => {
+                        stopped = true;
+                        break;
+                    }
                     Err(error) => {
                         return Err(format!(
                             "Crosshair was asked to stop but its shutdown could not be confirmed: {error}"
                         ));
                     }
                 }
+            }
+            if !stopped {
+                return Err(
+                    "Crosshair did not stop within three seconds; refusing to start a second daemon."
+                        .into(),
+                );
             }
         }
         Err(error) if overlay_is_not_running(&error) => {}
