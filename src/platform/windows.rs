@@ -1817,7 +1817,7 @@ mod tests {
                 ..Default::default()
             }));
             let running = Arc::new(AtomicBool::new(true));
-            let main_thread = super::GetCurrentThreadId();
+            let main_thread = unsafe { super::GetCurrentThreadId() };
             let mut queued_message = super::MSG::default();
             unsafe {
                 super::PeekMessageW(
