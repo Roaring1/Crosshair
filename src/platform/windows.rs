@@ -1501,24 +1501,21 @@ pub fn run_tray() -> Result<(), String> {
     }
 
     let watcher_running = Arc::new(AtomicBool::new(true));
-    let watcher = match watch_tray_overlay_state(
-        hwnd as isize,
-        paths.clone(),
-        watcher_running.clone(),
-    ) {
-        Ok(watcher) => watcher,
-        Err(error) => {
-            unsafe {
-                Shell_NotifyIconW(NIM_DELETE, &data);
-                DestroyWindow(hwnd);
-                if !custom_icon.is_null() {
-                    windows_sys::Win32::UI::WindowsAndMessaging::DestroyIcon(custom_icon);
+    let watcher =
+        match watch_tray_overlay_state(hwnd as isize, paths.clone(), watcher_running.clone()) {
+            Ok(watcher) => watcher,
+            Err(error) => {
+                unsafe {
+                    Shell_NotifyIconW(NIM_DELETE, &data);
+                    DestroyWindow(hwnd);
+                    if !custom_icon.is_null() {
+                        windows_sys::Win32::UI::WindowsAndMessaging::DestroyIcon(custom_icon);
+                    }
+                    UnregisterClassW(class_name.as_ptr(), instance);
                 }
-                UnregisterClassW(class_name.as_ptr(), instance);
+                return Err(error);
             }
-            return Err(error);
-        }
-    };
+        };
 
     trace(
         &paths,
