@@ -25,16 +25,22 @@ General, choose **App Activity**:
 - **System tray** starts a small Crosshair icon in the notification area. When the
   saved crosshair Enabled setting is on, launch also starts or reveals the overlay.
   Left-click the icon to toggle the crosshair; right-click for **Show app UI**,
-  **Toggle crosshair**, and **Exit tray**.
+  **Toggle crosshair**, and **Exit Crosshair**. Turning the overlay off closes
+  both the overlay daemon and the tray controller.
 - **Command only** makes a plain launch exit quietly. Use an explicit command to
   show, hide, or toggle the overlay.
 
 These are launch preferences, not feature locks. Settings can always be opened
-from the **Crosshair Settings** Start Menu entry or with `crosshair --config`; the
-tray can always be started explicitly with `crosshair --tray` on Windows. The tray controller and the crosshair overlay
-are independent. Closing Settings or exiting the tray does not itself disable an
-enabled overlay. The tray's **Show app UI** action works even when System tray is
-the saved default.
+from the **Crosshair Settings** Start Menu entry or with `crosshair --config`.
+The Start Menu **Crosshair** entry opens Settings while the overlay is OFF, so it
+is always possible to re-enable the app. An explicit `crosshair --tray` launch
+exits immediately when the overlay is disabled; it does not leave a background
+controller behind. The tray is a companion to an enabled overlay, not an
+independent background process. Closing Settings leaves an enabled overlay
+running. Turning the overlay OFF from the tray, Settings, or CLI closes both the
+overlay daemon and tray controller. **Exit Crosshair** hides/disables the overlay
+before closing the tray; if shutdown fails, the tray stays available. The tray's
+**Show app UI** action works even when System tray is the saved default.
 
 The command-line controls are always available regardless of App Activity:
 
@@ -63,8 +69,10 @@ non-activating, and click-through. This build is x64 only and requires Windows 1
 version 1607 (Anniversary Update) or later. Per-monitor-v2 awareness is used on
 Windows 10 version 1703 and newer, with a per-monitor-v1 fallback on older systems.
 
-The native Windows backend is under active validation. Run the supplied Windows
-smoke test on the target laptop before considering the port fully verified,
-especially for multi-monitor DPI changes, display hotplug, game fullscreen modes,
-cursor passthrough, tray interaction, and Settings-window behavior on the actual
-desktop.
+The GitHub Actions Windows job compiles and tests the native backend, then runs
+the per-user installer, overlay, named-pipe IPC, Settings, tray and shutdown smoke
+before packaging the x64 build. The Windows 11 target installation has been
+updated and the overlay and Settings have been user-confirmed. Unusual mixed or
+fractional DPI transitions, display hotplug, fullscreen-game behavior and cursor
+passthrough remain useful real-world feedback areas; report issues as they occur
+rather than treating them as blockers to routine updates.
