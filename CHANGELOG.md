@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased — 31/10/2026
+## Native Rust mainline migration — Cargo 4.0.0
+
+- Replaced the default Python/GTK application path with the native Rust application for Linux and Windows.
+- Added native Wayland layer-shell, X11 and Win32 overlay backends, plus the standalone Slint Settings application.
+- Added strict on-demand overlay lifetime, resilient IPC handling, per-user Windows tray lifecycle, and Linux/Windows installation and uninstall flows that retain user configuration.
+- Added cross-platform CI for Linux/Windows builds and lifecycle smoke coverage, renderer parity, Python compatibility checks, and dependency auditing.
+- Retained the earlier Python implementation as a compatibility and renderer-parity reference; its historical baseline is preserved by tag `working-python-2026-10-31`.
+
+
+## Historical Python implementation hardening — 2026-10-31
 
 - **Optimized:** the default install is on-demand, not a login daemon. A cold `--toggle` shows the overlay; a toggle against a live daemon hides it, saves state and exits after a short grace period when Settings is closed. `--autostart` remains an explicit opt-in.
 - **Optimized:** Settings is created lazily; config polling and the fixed-monitor geometry poll are removed; monitor changes are event-driven; the IPC listener blocks until a real command or explicit shutdown wakeup.

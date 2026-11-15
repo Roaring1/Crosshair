@@ -8,9 +8,9 @@ Native Rust crosshair overlay for Linux and Windows.
 
 | Platform | Backend | Current status |
 | --- | --- | --- |
-| Linux / Wayland | Native Wayland layer-shell client | Implemented; Settings is user-confirmed on Linux; live pointer-passthrough and fullscreen acceptance remain open |
-| Linux / X11 | Native X11 overlay | Implemented; automated Xvfb click-through and lifecycle checks pass |
-| Windows 10 1607+ / x64 | Win32 layered window and per-user named-pipe IPC | User-confirmed multi-monitor rendering and Settings; hosted installer/tray/overlay tests pass; mixed-DPI, hot-plug and fullscreen acceptance remain separate checks |
+| Linux / Wayland | Native Wayland layer-shell client | Implemented and installed on Nobara; compositor-specific behavior is refined from normal use |
+| Linux / X11 | Native X11 overlay | Implemented; click-through and lifecycle smoke coverage is in CI |
+| Windows 10 1607+ / x64 | Win32 layered window and per-user named-pipe IPC | Implemented and installed on the Windows 11 laptop; multi-monitor rendering and Settings are user-confirmed |
 | macOS | — | Not implemented |
 
 The overlay is designed to remain topmost, non-activating and click-through. The overlay daemon exists only while the overlay is enabled. Turning it off removes its windows, closes its IPC endpoint and exits the daemon; an off state is not represented by a hidden resident process. Settings is a separate Slint application and can close while an enabled overlay continues running.
@@ -83,7 +83,7 @@ The Windows CI job builds the two native executables, exercises the per-user ins
 - `Uninstall-Crosshair.ps1`
 - `README-WINDOWS.txt`
 
-Download the `Crosshair-Windows-x64` artifact from a successful [PR #3 Actions run](https://github.com/Roaring1/Crosshair/actions), extract it to a normal user-writable directory, then run this from PowerShell:
+Download the `Crosshair-Windows-x64` artifact from a successful [main-branch Actions run](https://github.com/Roaring1/Crosshair/actions/workflows/checks.yml?query=branch%3Amain), extract it to a normal user-writable directory, then run this from PowerShell:
 
 ```powershell
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\Install-Crosshair.ps1
@@ -93,7 +93,7 @@ No administrator rights are required. The installer targets `%LOCALAPPDATA%\Prog
 
 The in-app uninstall action defers file removal until the CLI and Settings processes have exited. Configuration under `%APPDATA%\Crosshair` is retained.
 
-The hosted Windows smoke covers the installer, overlay, named-pipe IPC, Settings, tray and shutdown lifecycle. User testing has also confirmed that the overlay renders correctly across multiple monitors and that Settings works on Windows. Mixed/fractional DPI, monitor hot-plug, fullscreen-game behavior, pointer passthrough and sleep/resume are distinct checks and are not implied by those results.
+The hosted Windows smoke covers the installer, overlay, named-pipe IPC, Settings, tray and shutdown lifecycle. The Windows 11 installation has been updated from the current CI package; the overlay renders correctly across multiple monitors and Settings has been user-confirmed. More unusual display, fullscreen, pointer and sleep/resume behavior should be reported and fixed as it is encountered during normal use, rather than treated as a release gate.
 
 ## CLI
 
@@ -146,16 +146,18 @@ python3 tests/render-parity.py
 bash tests/install-smoke.sh
 CROSSHAIR_BIN=target/release/crosshair bash tests/install-smoke.sh
 xvfb-run -a bash tests/x11-smoke.sh
-xvfb-run -a bash tests/settings-autostart-smoke.sh
+xvfb-run -a -s "-screen 0 1280x900x24" bash tests/settings-autostart-smoke.sh
 bash tests/settings-async-io-smoke.sh
+bash tests/cli-ipc-failure-smoke.sh
 bash tests/settings-ipc-recovery-smoke.sh
 bash tests/settings-ipc-restart-smoke.sh
 xvfb-run -a bash tests/settings-close-smoke.sh
+xvfb-run -a -s "-screen 0 1280x900x24" bash tests/settings-screenshots.sh
 ```
 
 The Linux job additionally captures eight Settings UI screenshots under an isolated Xvfb display, including General/Appearance navigation, color selection, expanded controls and scrolling. The Windows job runs native Rust tests, optimized builds and a PowerShell install/overlay/IPC/Settings/uninstall smoke test before packaging the x64 installer.
 
-See [RUST-PORT-TESTING.md](RUST-PORT-TESTING.md) for the isolated Wayland compositor test, screenshot coverage and limitations. See [RUST-PORT-STATUS.md](RUST-PORT-STATUS.md) for current CI evidence and remaining platform checks.
+See [RUST-PORT-TESTING.md](RUST-PORT-TESTING.md) for the CI commands, isolated Wayland compositor smoke and screenshot coverage. See [RUST-PORT-STATUS.md](RUST-PORT-STATUS.md) for the current repository/deployment state and historical implementation record.
 
 ## License status
 

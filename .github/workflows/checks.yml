@@ -1,8 +1,7 @@
 name: Crosshair checks
 
 on:
-  # rust-port is validated through its open pull request; running both push
-  # and pull_request events for every commit only duplicated the full matrix.
+  # Validate every mainline update and every pull request before it is merged.
   push:
     branches: [main]
   pull_request:

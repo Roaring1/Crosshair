@@ -1,7 +1,8 @@
 # Native Rust port testing
 
-The Rust rewrite is developed on the `rust-port` branch. Its normal automated
-checks are:
+The native Rust implementation is maintained on the default `main` branch.
+The same automated checks run for pull requests targeting `main` and for
+updates pushed to `main`:
 
 ```bash
 cargo fmt --all -- --check
@@ -12,11 +13,13 @@ python3 tests/render-parity.py
 bash tests/install-smoke.sh
 CROSSHAIR_BIN=target/release/crosshair bash tests/install-smoke.sh
 xvfb-run -a bash tests/x11-smoke.sh
-xvfb-run -a bash tests/settings-autostart-smoke.sh
+xvfb-run -a -s "-screen 0 1280x900x24" bash tests/settings-autostart-smoke.sh
 bash tests/settings-async-io-smoke.sh
+bash tests/cli-ipc-failure-smoke.sh
 bash tests/settings-ipc-recovery-smoke.sh
 bash tests/settings-ipc-restart-smoke.sh
 xvfb-run -a bash tests/settings-close-smoke.sh
+xvfb-run -a -s "-screen 0 1280x900x24" bash tests/settings-screenshots.sh
 ```
 
 ## Optional live Wayland compositor smoke
@@ -39,8 +42,9 @@ appearance IPC, and graceful daemon shutdown.
 This is a real layer-shell client/compositor test, but KWin's virtual backend
 currently exposes a single integer-scale virtual output. It does not validate
 fractional scaling, physical multi-monitor layout, hotplug, GPU scanout,
-fullscreen game behavior, or target-machine pointer passthrough. Those remain
-separate manual release checks.
+fullscreen game behavior, or target-machine pointer passthrough. Those remain useful real-world feedback areas. They are not publication gates;
+report any issue seen in normal use and address it through a focused fix on
+`main`.
 
 
 ## Settings UI screenshots
