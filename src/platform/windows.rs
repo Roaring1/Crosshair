@@ -684,7 +684,9 @@ fn next_refresh_retry_delay_ms(previous_delay_ms: u32) -> u32 {
     if previous_delay_ms == 0 {
         250
     } else {
-        previous_delay_ms.saturating_mul(2).min(REFRESH_RETRY_MAX_DELAY_MS)
+        previous_delay_ms
+            .saturating_mul(2)
+            .min(REFRESH_RETRY_MAX_DELAY_MS)
     }
 }
 
@@ -1795,7 +1797,9 @@ mod tests {
         }
         assert_eq!(
             observed,
-            vec![250, 500, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000]
+            vec![
+                250, 500, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000
+            ]
         );
     }
 
