@@ -23,9 +23,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED,
-    ERROR_SEM_TIMEOUT, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, HWND, LPARAM, POINT, SIZE,
-    WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
+    CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, ERROR_SEM_TIMEOUT,
+    GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, HWND, LPARAM, POINT, SIZE, WAIT_FAILED,
+    WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
@@ -1148,7 +1148,9 @@ fn toggle_crosshair_from_tray(hwnd: HWND) {
     let executable = match std::env::current_exe() {
         Ok(executable) => executable,
         Err(error) => {
-            tray_trace(&format!("tray toggle could not resolve the CLI path: {error}"));
+            tray_trace(&format!(
+                "tray toggle could not resolve the CLI path: {error}"
+            ));
             return;
         }
     };
@@ -1353,9 +1355,7 @@ fn watch_tray_overlay_state(
                     if error != ERROR_SEM_TIMEOUT && !warned_unexpected_error {
                         trace(
                             &paths,
-                            &format!(
-                                "tray watcher: pipe error {error}; keeping tray active"
-                            ),
+                            &format!("tray watcher: pipe error {error}; keeping tray active"),
                         );
                         warned_unexpected_error = true;
                     }
