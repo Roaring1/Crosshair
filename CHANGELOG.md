@@ -1,5 +1,10 @@
 # Changelog
 
+## Monitor diagnostics — 2026-11-15
+
+- **Added:** `crosshair --doctor` reports currently connected outputs and warns when the saved monitor name or index is unavailable. It never changes the selected output or silently falls back to another display.
+- **Tested:** regression coverage verifies a missing `DP-2` target is reported while an unrelated `HDMI-A-2` remains connected, and duplicate connector names continue to honor their saved ordinal.
+
 ## Native Rust reliability maintenance — 2026-11-15
 
 - **Fixed:** Windows named-pipe responses now use a bounded client acknowledgement before the server disconnects a request. Shutdown commands can no longer lose their final CLI response when the daemon exits immediately after writing it.

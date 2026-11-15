@@ -120,6 +120,8 @@ crosshair --uninstall
 
 `--set` accepts a JSON object of configuration fields. Values are validated against the same configuration model used by Settings. A cold `--toggle` starts the overlay enabled; a toggle against a running daemon changes its current state.
 
+`--doctor` is read-only. It reports the active session, daemon status, connected outputs, and whether a saved named-monitor or index selection is currently available. It warns when a saved target is missing; it does not rewrite the configuration or silently move the crosshair to another display.
+
 ## Configuration and logs
 
 | Purpose | Linux | Windows |

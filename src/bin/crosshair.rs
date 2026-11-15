@@ -5,7 +5,7 @@ mod wayland;
 #[path = "../platform/linux/x11.rs"]
 mod x11;
 
-use crosshair_core::{APP_VERSION, AppPaths, Config};
+use crosshair_core::{APP_VERSION, AppPaths, Config, MonitorDescriptor};
 #[cfg(target_os = "linux")]
 use crosshair_core::{
     atomic_write_user_executable, atomic_write_user_file, remove_user_file, remove_user_files,
@@ -19,6 +19,132 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(target_os = "linux")]
+fn discover_monitors() -> Result<Vec<MonitorDescriptor>, String> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        wayland::list_outputs()
+    } else if std::env::var_os("DISPLAY").is_some() {
+        x11::list_outputs()
+    } else {
+        Err("No Wayland or X11 display session was detected.".into())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn discover_monitors() -> Result<Vec<MonitorDescriptor>, String> {
+    crosshair_core::windows::list_monitors()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn discover_monitors() -> Result<Vec<MonitorDescriptor>, String> {
+    Err("Monitor enumeration is not implemented for this platform.".into())
+}
+
+fn monitor_selection_warning(config: &Config, monitors: &[MonitorDescriptor]) -> Option<String> {
+    if monitors.is_empty() {
+        return Some("No active displays are visible to this session.".into());
+    }
+
+    match config.monitor_mode.as_str() {
+        "name"
+            if !monitors.iter().any(|monitor| {
+                monitor.name == config.monitor_name
+                    && monitor.ordinal == config.monitor_name_ordinal
+            }) =>
+        {
+            Some(format!(
+                "Saved monitor target {} (match {}) is not connected; no fallback monitor will be used.",
+                config.monitor_name,
+                config.monitor_name_ordinal + 1
+            ))
+        }
+        "index" if config.monitor_index as usize >= monitors.len() => Some(format!(
+            "Saved monitor index {} is unavailable; {} output(s) are connected.",
+            config.monitor_index,
+            monitors.len()
+        )),
+        _ => None,
+    }
+}
+
+fn print_monitor_diagnostics(config: &Config) {
+    match discover_monitors() {
+        Ok(monitors) => {
+            let connected = if monitors.is_empty() {
+                "none".into()
+            } else {
+                monitors
+                    .iter()
+                    .map(|monitor| {
+                        if monitor.ordinal == 0 {
+                            monitor.name.clone()
+                        } else {
+                            format!("{}#{}", monitor.name, monitor.ordinal + 1)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            println!("Connected outputs: {connected}");
+            if let Some(warning) = monitor_selection_warning(config, &monitors) {
+                println!("Monitor selection: {warning}");
+            } else {
+                println!("Monitor selection: {}", config.monitor_mode);
+            }
+        }
+        Err(error) => println!("Output discovery: unavailable ({error})"),
+    }
+}
+
+#[cfg(test)]
+mod monitor_diagnostic_tests {
+    use super::monitor_selection_warning;
+    use crosshair_core::{Config, MonitorDescriptor};
+
+    #[test]
+    fn doctor_warns_when_saved_named_monitor_is_missing_without_selecting_a_fallback() {
+        let config = Config {
+            monitor_mode: "name".into(),
+            monitor_name: "DP-2".into(),
+            monitor_name_ordinal: 0,
+            ..Config::default()
+        };
+        let connected = vec![MonitorDescriptor {
+            name: "HDMI-A-2".into(),
+            ordinal: 0,
+        }];
+
+        assert_eq!(
+            monitor_selection_warning(&config, &connected).as_deref(),
+            Some(
+                "Saved monitor target DP-2 (match 1) is not connected; no fallback monitor will be used."
+            )
+        );
+    }
+
+    #[test]
+    fn doctor_accepts_a_matching_duplicate_name_ordinal() {
+        let config = Config {
+            monitor_mode: "name".into(),
+            monitor_name: "DP-1".into(),
+            monitor_name_ordinal: 1,
+            ..Config::default()
+        };
+        let connected = vec![
+            MonitorDescriptor {
+                name: "DP-1".into(),
+                ordinal: 0,
+            },
+            MonitorDescriptor {
+                name: "DP-1".into(),
+                ordinal: 1,
+            },
+        ];
+
+        assert_eq!(monitor_selection_warning(&config, &connected), None);
+    }
+}
 
 #[cfg(unix)]
 fn send_command(
@@ -807,34 +933,12 @@ fn run() -> Result<(), String> {
         return import_profile(&paths, code);
     }
     if args.iter().any(|a| a == "--list-monitors") {
-        #[cfg(target_os = "linux")]
-        {
-            let monitors = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-                wayland::list_outputs()?
-            } else if std::env::var_os("DISPLAY").is_some() {
-                x11::list_outputs()?
-            } else {
-                return Err("No Wayland or X11 display session was detected.".into());
-            };
-            println!(
-                "{}",
-                serde_json::to_string(&monitors).map_err(|error| error.to_string())?
-            );
-            return Ok(());
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let monitors = crosshair_core::windows::list_monitors()?;
-            println!(
-                "{}",
-                serde_json::to_string(&monitors).map_err(|error| error.to_string())?
-            );
-            return Ok(());
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-        {
-            return Err("Monitor enumeration is not implemented for this platform yet.".into());
-        }
+        let monitors = discover_monitors()?;
+        println!(
+            "{}",
+            serde_json::to_string(&monitors).map_err(|error| error.to_string())?
+        );
+        return Ok(());
     }
     if args.iter().any(|a| a == "--daemon") {
         let mut config = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
@@ -926,7 +1030,9 @@ fn run() -> Result<(), String> {
             "X11: {}",
             std::env::var("DISPLAY").unwrap_or_else(|_| "not active".into())
         );
+        let config = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
         print_status(&paths)?;
+        print_monitor_diagnostics(&config);
         return Ok(());
     }
     if args.iter().any(|a| a == "--open-config-folder") {
