@@ -60,7 +60,7 @@ does not claim to sandbox or contain same-user malware.
 The project runs Ruff, Python byte-compilation, pytest, Bandit medium/high
 severity checks in the Python 3.10–3.14 matrix. Dependency advisory scanning
 runs in a separate Python 3.14 job using `requirements-audit.txt`, which pins
-the fixed `filelock==4.2.1` release (the patched release requires Python 3.11+;
+the fixed `filelock==4.2.10` release (which requires Python 3.11+;
 older versions are affected by current advisories). GitHub Actions references
 and direct development/audit-tool versions are pinned; Dependabot checks for
 updates weekly.
