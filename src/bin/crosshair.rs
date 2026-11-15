@@ -280,7 +280,9 @@ fn import_profile(paths: &AppPaths, code: &str) -> Result<(), String> {
     ) {
         Ok(_) => println!("Crosshair profile imported and applied."),
         Err(error) if overlay_is_not_running(&error) => {
-            println!("Crosshair profile imported. It will be used the next time the overlay is shown.");
+            println!(
+                "Crosshair profile imported. It will be used the next time the overlay is shown."
+            );
         }
         Err(error) => {
             return Err(format!(

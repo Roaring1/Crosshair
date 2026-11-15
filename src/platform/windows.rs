@@ -740,12 +740,7 @@ fn merge_config(current: &Config, payload: Value) -> Result<Config, String> {
     Config::from_json(&value.to_string()).map_err(|error| error.to_string())
 }
 
-fn request_daemon_stop(
-    paths: &AppPaths,
-    running: &AtomicBool,
-    main_thread: u32,
-    command: &str,
-) {
+fn request_daemon_stop(paths: &AppPaths, running: &AtomicBool, main_thread: u32, command: &str) {
     running.store(false, Ordering::Release);
     if unsafe { PostThreadMessageW(main_thread, WM_QUIT, 0, 0) } == 0 {
         trace(
@@ -1201,7 +1196,9 @@ fn exit_crosshair_from_tray(hwnd: HWND) {
     let executable = match std::env::current_exe() {
         Ok(executable) => executable,
         Err(error) => {
-            tray_trace(&format!("Exit Crosshair could not resolve the CLI path: {error}"));
+            tray_trace(&format!(
+                "Exit Crosshair could not resolve the CLI path: {error}"
+            ));
             return;
         }
     };
@@ -1898,12 +1895,8 @@ mod tests {
         assert_eq!(persisted.shape, "x");
         assert_eq!(persisted.size, 37);
 
-        send_command(
-            &paths,
-            "preview",
-            Some(json!({"enabled": false})),
-        )
-        .expect("disabling the overlay from Settings preview should be acknowledged");
+        send_command(&paths, "preview", Some(json!({"enabled": false})))
+            .expect("disabling the overlay from Settings preview should be acknowledged");
         let result = worker
             .join()
             .expect("Windows overlay thread should not panic");
