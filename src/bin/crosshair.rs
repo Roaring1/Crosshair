@@ -244,16 +244,19 @@ fn launch_settings() -> Result<(), String> {
     Ok(())
 }
 
-fn spawn_daemon(paths: &AppPaths) -> Result<(), String> {
-    #[cfg(not(windows))]
-    let _ = paths;
+fn spawn_daemon(paths: &AppPaths) -> Result<std::process::Child, String> {
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let mut command = Command::new(executable);
     command.arg("--daemon");
-    #[cfg(windows)]
-    let stderr = {
+
+    #[cfg(target_os = "windows")]
+    {
         use std::os::windows::process::CommandExt;
         command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    let stderr = {
         let parent = paths
             .log_file
             .parent()
@@ -267,34 +270,68 @@ fn spawn_daemon(paths: &AppPaths) -> Result<(), String> {
             .map_err(|error| format!("Could not open Crosshair startup log: {error}"))?;
         Stdio::from(log)
     };
-    #[cfg(not(windows))]
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     let stderr = Stdio::null();
+
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr)
         .spawn()
-        .map_err(|error| format!("Could not start Crosshair: {error}"))?;
-    Ok(())
+        .map_err(|error| format!("Could not start Crosshair: {error}"))
 }
 
 fn start_enabled(paths: &AppPaths) -> Result<(), String> {
     let mut config = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
+    let monitors =
+        discover_monitors().map_err(|error| format!("Could not start Crosshair: {error}"))?;
+    if let Some(warning) = monitor_selection_warning(&config, &monitors) {
+        return Err(format!("Could not start Crosshair: {warning}"));
+    }
+
     config.enabled = true;
     config
         .save_atomic(&paths.config_file)
         .map_err(|error| error.to_string())?;
-    spawn_daemon(paths)?;
+
+    let mut child = spawn_daemon(paths)?;
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(25));
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "Crosshair daemon exited before becoming ready ({status}). Startup details: {}",
+                    paths.log_file.display()
+                ));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "Could not inspect Crosshair daemon startup; the child was stopped: {error}"
+                ));
+            }
+        }
+
         if let Ok(response) = send_command(paths, "status", None) {
             if response.get("enabled").and_then(serde_json::Value::as_bool) == Some(true) {
                 return Ok(());
             }
         }
+        thread::sleep(Duration::from_millis(25));
     }
-    Err("Crosshair did not become ready within ten seconds. Run crosshair --doctor for diagnostics.".into())
+
+    // Do not leave an unresponsive child behind after the caller reports a
+    // failed cold start. The daemon owns no external state beyond its own
+    // process and overlay, so terminating this exact child is safe here.
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(format!(
+        "Crosshair did not become ready within ten seconds; the unresponsive startup process was stopped. Startup details: {}",
+        paths.log_file.display()
+    ))
 }
 
 fn ensure_running_then(paths: &AppPaths, command: &str) -> Result<(), String> {
