@@ -21,6 +21,76 @@ use std::{
 };
 
 #[cfg(target_os = "linux")]
+fn discover_wayland_display(runtime_dir: &Path) -> Result<Option<String>, String> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let entries = std::fs::read_dir(runtime_dir)
+        .map_err(|error| format!("Could not inspect Wayland runtime directory: {error}"))?;
+    let mut displays = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("Could not inspect Wayland socket: {error}"))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with("wayland-") {
+            continue;
+        }
+        let metadata = entry
+            .path()
+            .symlink_metadata()
+            .map_err(|error| format!("Could not inspect Wayland socket {name}: {error}"))?;
+        if metadata.file_type().is_socket() && metadata.uid() == unsafe { libc::getuid() } {
+            displays.push(name.to_owned());
+        }
+    }
+    displays.sort();
+
+    match displays.as_slice() {
+        [] => Ok(None),
+        [display] => Ok(Some(display.clone())),
+        _ => Err(format!(
+            "Multiple Wayland compositor sockets were found in {}; set WAYLAND_DISPLAY explicitly to select the active session",
+            runtime_dir.display()
+        )),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn restore_wayland_display_environment() -> Result<(), String> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var("XDG_SESSION_TYPE").as_deref() != Ok("wayland")
+    {
+        return Ok(());
+    }
+
+    let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) else {
+        if std::env::var_os("DISPLAY").is_some() {
+            return Ok(());
+        }
+        return Err(
+            "Wayland session detected, but XDG_RUNTIME_DIR is missing and no display endpoint is available"
+                .into(),
+        );
+    };
+
+    if let Some(display) = discover_wayland_display(&runtime_dir)? {
+        // The CLI is still single-threaded here, before any worker or event-loop
+        // threads are created. Restore the standard Wayland variable so both
+        // monitor discovery and the detached daemon use the same compositor.
+        unsafe {
+            std::env::set_var("WAYLAND_DISPLAY", display);
+        }
+    } else if std::env::var_os("DISPLAY").is_none() {
+        return Err(format!(
+            "Wayland session detected, but no owned wayland-* socket was found in {}",
+            runtime_dir.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn discover_monitors() -> Result<Vec<MonitorDescriptor>, String> {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         wayland::list_outputs()
@@ -869,6 +939,16 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
 
+    #[cfg(target_os = "linux")]
+    if args.iter().any(|argument| {
+        matches!(
+            argument.as_str(),
+            "--doctor" | "--list-monitors" | "--daemon" | "--toggle" | "--show" | "--restart"
+        )
+    }) {
+        restore_wayland_display_environment()?;
+    }
+
     let paths = AppPaths::discover().map_err(|error| error.to_string())?;
     if args.is_empty() {
         let config = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
@@ -1129,6 +1209,48 @@ mod tests {
         assert!(!overlay_is_not_running(
             "Could not reach the Crosshair named-pipe listener (Windows error 121)"
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finds_the_only_owned_wayland_socket_when_the_environment_was_omitted() {
+        use super::discover_wayland_display;
+        use std::os::unix::net::UnixListener;
+
+        let runtime = tempfile::tempdir().unwrap();
+        let _socket = UnixListener::bind(runtime.path().join("wayland-0")).unwrap();
+        std::fs::write(runtime.path().join("wayland-not-a-socket"), b"ignore").unwrap();
+
+        assert_eq!(
+            discover_wayland_display(runtime.path()).unwrap().as_deref(),
+            Some("wayland-0")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refuses_to_guess_when_multiple_wayland_sockets_exist() {
+        use super::discover_wayland_display;
+        use std::os::unix::net::UnixListener;
+
+        let runtime = tempfile::tempdir().unwrap();
+        let _first = UnixListener::bind(runtime.path().join("wayland-0")).unwrap();
+        let _second = UnixListener::bind(runtime.path().join("wayland-1")).unwrap();
+
+        let error = discover_wayland_display(runtime.path()).unwrap_err();
+        assert!(error.contains("Multiple Wayland compositor sockets"));
+        assert!(error.contains("WAYLAND_DISPLAY explicitly"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn does_not_treat_a_regular_file_as_a_wayland_socket() {
+        use super::discover_wayland_display;
+
+        let runtime = tempfile::tempdir().unwrap();
+        std::fs::write(runtime.path().join("wayland-0"), b"not a socket").unwrap();
+
+        assert_eq!(discover_wayland_display(runtime.path()).unwrap(), None);
     }
 }
 
