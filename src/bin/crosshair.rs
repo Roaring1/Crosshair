@@ -284,6 +284,12 @@ fn spawn_daemon(paths: &AppPaths) -> Result<std::process::Child, String> {
 
 fn start_enabled(paths: &AppPaths) -> Result<(), String> {
     let mut config = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
+    let monitors = discover_monitors()
+        .map_err(|error| format!("Could not start Crosshair: {error}"))?;
+    if let Some(warning) = monitor_selection_warning(&config, &monitors) {
+        return Err(format!("Could not start Crosshair: {warning}"));
+    }
+
     config.enabled = true;
     config
         .save_atomic(&paths.config_file)
