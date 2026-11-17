@@ -40,7 +40,12 @@ fn discover_wayland_display(runtime_dir: &Path) -> Result<Option<String>, String
             .path()
             .symlink_metadata()
             .map_err(|error| format!("Could not inspect Wayland socket {name}: {error}"))?;
-        if metadata.file_type().is_socket() && metadata.uid() == unsafe { libc::getuid() } {
+        if metadata.file_type().is_socket()
+            && metadata.uid() == unsafe { libc::getuid() }
+            && std::os::unix::net::UnixStream::connect(entry.path()).is_ok()
+        {
+            // A stale socket pathname can outlive its compositor. Only treat
+            // sockets that currently accept a connection as display candidates.
             displays.push(name.to_owned());
         }
     }
@@ -353,6 +358,9 @@ fn spawn_daemon(paths: &AppPaths) -> Result<std::process::Child, String> {
 }
 
 fn start_enabled(paths: &AppPaths) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    restore_wayland_display_environment()?;
+
     let mut config = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
     let monitors =
         discover_monitors().map_err(|error| format!("Could not start Crosshair: {error}"))?;
@@ -458,9 +466,17 @@ fn print_status(paths: &AppPaths) -> Result<(), String> {
 }
 
 fn restart_daemon(paths: &AppPaths) -> Result<(), String> {
-    let enabled = Config::load(&paths.config_file)
-        .map_err(|error| error.to_string())?
-        .enabled;
+    let config = Config::load(&paths.config_file).map_err(|error| error.to_string())?;
+    let enabled = config.enabled;
+    if enabled {
+        let monitors =
+            discover_monitors().map_err(|error| format!("Could not restart Crosshair: {error}"))?;
+        if let Some(warning) = monitor_selection_warning(&config, &monitors) {
+            return Err(format!(
+                "Could not restart Crosshair; the current daemon was left running: {warning}"
+            ));
+        }
+    }
     match send_command(paths, "quit", None) {
         Ok(_) => {
             let mut stopped = false;
@@ -943,7 +959,7 @@ fn run() -> Result<(), String> {
     if args.iter().any(|argument| {
         matches!(
             argument.as_str(),
-            "--doctor" | "--list-monitors" | "--daemon" | "--toggle" | "--show" | "--restart"
+            "--doctor" | "--list-monitors" | "--daemon" | "--restart"
         )
     }) {
         restore_wayland_display_environment()?;
