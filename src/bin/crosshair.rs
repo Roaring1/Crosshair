@@ -319,10 +319,23 @@ fn launch_settings() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn isolate_daemon_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // Padfire and other launchers supervise their short-lived CLI process
+    // group. The overlay daemon has an independent lifetime and must not be
+    // swept up when that CLI returns after acknowledging startup.
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn isolate_daemon_process_group(_command: &mut Command) {}
+
 fn spawn_daemon(paths: &AppPaths) -> Result<std::process::Child, String> {
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let mut command = Command::new(executable);
     command.arg("--daemon");
+    isolate_daemon_process_group(&mut command);
 
     #[cfg(target_os = "windows")]
     {
@@ -1212,6 +1225,47 @@ fn run() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::overlay_is_not_running;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn daemon_process_group_is_independent_of_its_cli_parent_group() {
+        use super::isolate_daemon_process_group;
+        use std::process::Command;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg("sleep 30");
+        isolate_daemon_process_group(&mut command);
+        let mut child = command.spawn().expect("spawn isolated daemon fixture");
+
+        let stat_path = format!("/proc/{}/stat", child.id());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let process_group = loop {
+            if let Ok(stat) = std::fs::read_to_string(&stat_path) {
+                let fields = stat
+                    .rsplit_once(") ")
+                    .expect("process stat has a command separator")
+                    .1
+                    .split_whitespace()
+                    .collect::<Vec<_>>();
+                break fields[2].parse::<u32>().expect("numeric process group");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "isolated child did not appear in /proc"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        assert_eq!(
+            process_group,
+            child.id(),
+            "daemon must be its own process-group leader"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 
     #[test]
     fn only_an_explicit_missing_endpoint_allows_cold_start_or_noop_shutdown() {
